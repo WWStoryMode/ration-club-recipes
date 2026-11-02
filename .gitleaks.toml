@@ -1,0 +1,11 @@
+title = "ration-club-recipes"
+
+[extend]
+useDefault = true
+
+# Fail on anything that looks like an OAuth token stored in JSON (e.g. a copied .secrets file).
+[[rules]]
+id = "oauth-token-json"
+description = "OAuth access/refresh token in JSON"
+regex = '''"(access_token|refresh_token|code_verifier|client_secret)"\s*:\s*"[^"]{8,}"'''
+keywords = ["access_token", "refresh_token", "code_verifier", "client_secret"]

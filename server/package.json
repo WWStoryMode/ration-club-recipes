@@ -1,0 +1,25 @@
+{
+  "name": "server",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "login": "tsx --env-file-if-exists=../.env src/scripts/login.ts",
+    "check": "tsx --env-file-if-exists=../.env src/scripts/check.ts",
+    "token-info": "tsx --env-file-if-exists=../.env src/scripts/tokenInfo.ts",
+    "create-test-doc": "tsx --env-file-if-exists=../.env src/scripts/createTestDoc.ts",
+    "capture-fixtures": "tsx --env-file-if-exists=../.env src/scripts/captureFixtures.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "hono": "^4.11.4",
+    "open": "^10.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0"
+  }
+}

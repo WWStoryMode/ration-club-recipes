@@ -1,0 +1,15 @@
+# Secrets: OAuth client registration, tokens, PKCE verifier. NEVER commit.
+.secrets/
+.env*
+!.env.example
+
+node_modules/
+dist/
+coverage/
+*.log
+.DS_Store
+.vercel/
+
+# gitleaks reports contain unredacted secrets unless run with --redact
+gitleaks-report*
+*.sarif

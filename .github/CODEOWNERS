@@ -1,0 +1,10 @@
+# Files that run code on maintainers' machines or decide what counts as a secret.
+# Enforced only when branch protection requires code-owner review.
+/.husky/                  @WWStoryMode
+/package.json             @WWStoryMode
+/server/package.json      @WWStoryMode
+/web/package.json         @WWStoryMode
+/pnpm-workspace.yaml      @WWStoryMode
+/.gitleaks.toml           @WWStoryMode
+/.gitignore               @WWStoryMode
+/.github/                 @WWStoryMode
