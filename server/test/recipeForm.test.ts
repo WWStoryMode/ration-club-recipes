@@ -19,6 +19,7 @@ const full: RecipeForm = {
   tips: ["Any short pasta works."],
   story: "Mario's family recipe.\n\nWe made it for the welcome dinner.",
   other: "",
+  photos: [],
 };
 
 describe("recipe form", () => {
@@ -141,6 +142,7 @@ describe("recipe form", () => {
       tips: ["Swap rice for couscous", "Use \\ backslash? fine"],
       story: "# Not a heading\n\nMade at the *welcome* dinner > 50 people.\n1. not a list",
       other: "",
+      photos: [],
     });
   });
 

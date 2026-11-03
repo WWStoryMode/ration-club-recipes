@@ -11,8 +11,19 @@ export interface FormValues {
   tips: string[];
   story: string;
   other: string; // read-only: text already in the recipe that fits no field
+  photos: Photo[]; // pictures/videos at the end of the recipe, in order
 }
-export type VisitorForm = Omit<FormValues, "other">;
+export interface Photo {
+  kind: string; // "image", "youtube", …
+  caption: string;
+  url?: string; // known only for photos added through this site
+}
+export interface NewPhoto {
+  url: string;
+  caption: string;
+}
+/** What the page sends: a caption per existing photo (in order) and links for new photos. Never `other`. */
+export type VisitorForm = Omit<FormValues, "other" | "photos"> & { photos: Array<{ caption: string }>; newPhotos: NewPhoto[] };
 
 export interface RecipeSummary {
   id: string;
@@ -30,7 +41,7 @@ export interface Config {
   turnstileSiteKey: string | null;
   honeypotField: string;
   requiresApproval: boolean;
-  limits: { titleChars: number; form: { name: number; short: number; line: number; lines: number; story: number } };
+  limits: { titleChars: number; form: { name: number; short: number; line: number; lines: number; story: number; caption: number }; photos: { perSave: number; perRecipe: number } };
 }
 
 /** Saved now, or waiting for an organiser. */
@@ -84,12 +95,7 @@ export const api = {
   },
 };
 
-export const emptyValues = (): FormValues => ({ headChef: "", helpers: "", date: "", serves: "", cost: "", ingredients: [], method: [], tips: [], story: "", other: "" });
-
-export function visitorForm(v: FormValues): VisitorForm {
-  const { other: _other, ...rest } = v;
-  return rest;
-}
+export const emptyValues = (): FormValues => ({ headChef: "", helpers: "", date: "", serves: "", cost: "", ingredients: [], method: [], tips: [], story: "", other: "", photos: [] });
 
 const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
 /** "2026-09-30" → "30 September 2026" */

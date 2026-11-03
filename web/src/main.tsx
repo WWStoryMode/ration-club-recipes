@@ -1,6 +1,6 @@
 import { StrictMode, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
-import { api, ApiError, emptyValues, prettyDate, visitorForm, type Config, type FormValues, type Recipe, type RecipeSummary } from "./api";
+import { api, ApiError, emptyValues, prettyDate, type Config, type FormValues, type NewPhoto, type Photo, type Recipe, type RecipeSummary, type VisitorForm } from "./api";
 import { Turnstile } from "./turnstile";
 import "./styles.css";
 
@@ -236,6 +236,12 @@ function RecipeView({ id }: { id: string }) {
               <p className="pre muted">{v.other}</p>
             </>
           )}
+          {v.photos.length > 0 && (
+            <>
+              <h2>Photos</h2>
+              {v.photos.map((p, i) => <PhotoFigure key={i} photo={p} />)}
+            </>
+          )}
           <a className="button" href={`#/r/${r.id}/edit`}>
             Edit this recipe
           </a>
@@ -258,6 +264,21 @@ function RecipeView({ id }: { id: string }) {
         </>
       )}
     </article>
+  );
+}
+
+/** A photo is a link to a picture on another site; the browser loads it from there. No referrer is sent. */
+function PhotoFigure({ photo }: { photo: Photo }) {
+  const [broken, setBroken] = useState(false);
+  return (
+    <figure className="photo">
+      {photo.kind === "image" && photo.url && !broken ? (
+        <img src={photo.url} alt={photo.caption || "Recipe photo"} loading="lazy" referrerPolicy="no-referrer" onError={() => setBroken(true)} />
+      ) : (
+        <div className="media">{photo.kind === "image" ? (broken ? "📷 This photo can't be shown right now." : "📷 A picture is here in the booklet.") : "🎬 A video is here in the booklet."}</div>
+      )}
+      {photo.caption && <figcaption>{photo.caption}</figcaption>}
+    </figure>
   );
 }
 
@@ -293,6 +314,8 @@ interface Fields {
   method: string;
   tips: string;
   story: string;
+  photoCaptions: string[]; // one per existing photo, in order
+  newPhotos: NewPhoto[];
 }
 interface Draft {
   baseRev?: string;
@@ -310,10 +333,23 @@ const toFields = (v: FormValues, title = ""): Fields => ({
   method: v.method.join("\n"),
   tips: v.tips.join("\n"),
   story: v.story,
+  photoCaptions: v.photos.map((p) => p.caption),
+  newPhotos: [],
 });
 const lines = (t: string) => t.split("\n").map((l) => l.trim()).filter(Boolean);
-const toForm = (f: Fields) =>
-  visitorForm({ ...emptyValues(), headChef: f.headChef, helpers: f.helpers, date: f.date, serves: f.serves, cost: f.cost, ingredients: lines(f.ingredients), method: lines(f.method), tips: lines(f.tips), story: f.story });
+const toForm = (f: Fields): VisitorForm => ({
+  headChef: f.headChef,
+  helpers: f.helpers,
+  date: f.date,
+  serves: f.serves,
+  cost: f.cost,
+  ingredients: lines(f.ingredients),
+  method: lines(f.method),
+  tips: lines(f.tips),
+  story: f.story,
+  photos: f.photoCaptions.map((caption) => ({ caption })),
+  newPhotos: f.newPhotos.filter((p) => p.url.trim()).map((p) => ({ url: p.url.trim(), caption: p.caption })),
+});
 const sameFields = (a: Fields, b: Fields) => JSON.stringify(a) === JSON.stringify(b);
 
 function RecipeEditor({ id, config, onDone }: { id?: string; config: Config; onDone: (msg: string) => void }) {
@@ -355,12 +391,14 @@ function RecipeEditor({ id, config, onDone }: { id?: string; config: Config; onD
     api.recipe(id).then(startFrom, (e) => setLoadError(e instanceof ApiError ? e.message : "Something went wrong. Please reload the page."));
   }, [id, isNew, startFrom]);
 
-  const set = (k: keyof Fields) => (e: { target: { value: string } }) => {
-    const next = { ...fields, [k]: e.target.value };
+  const update = (next: Fields) => {
     setFields(next);
     if (sameFields(next, original)) drafts.clear(draftKey);
     else drafts.set(draftKey, { baseRev, fields: next });
   };
+  const set = (k: Exclude<keyof Fields, "photoCaptions" | "newPhotos">) => (e: { target: { value: string } }) => update({ ...fields, [k]: e.target.value });
+  const existingPhotos = recipe?.form.values.photos ?? [];
+  const photoSlots = Math.min(config.limits.photos.perSave, config.limits.photos.perRecipe - existingPhotos.length);
 
   if (loadError)
     return (
@@ -482,6 +520,68 @@ function RecipeEditor({ id, config, onDone }: { id?: string; config: Config; onD
         </label>
       </fieldset>
 
+      <fieldset>
+        <legend>
+          Photos <span className="opt">(optional)</span>
+        </legend>
+        {existingPhotos.map((p, i) => (
+          <div key={i} className="photo-row">
+            <PhotoFigure photo={{ ...p, caption: "" }} />
+            <Text
+              label={`Caption for photo ${i + 1}`}
+              value={fields.photoCaptions[i] ?? ""}
+              onChange={(e) => update({ ...fields, photoCaptions: fields.photoCaptions.map((c, j) => (j === i ? e.target.value : c)) })}
+              max={config.limits.form.caption}
+              optional
+            />
+          </div>
+        ))}
+        {fields.newPhotos.map((p, i) => (
+          <div key={`new${i}`} className="photo-row new">
+            <label className="field">
+              <span className="label">Photo link</span>
+              <span className="hint">
+                The address of the picture itself, starting with https://. On a computer, right-click the photo and choose "Copy image address".
+              </span>
+              <input
+                type="url"
+                inputMode="url"
+                autoComplete="off"
+                placeholder="https://…"
+                value={p.url}
+                maxLength={1000}
+                onChange={(e) => update({ ...fields, newPhotos: fields.newPhotos.map((x, j) => (j === i ? { ...x, url: e.target.value } : x)) })}
+              />
+            </label>
+            {/^https:\/\/\S+\.\S+/.test(p.url.trim()) && <PhotoFigure photo={{ kind: "image", caption: "", url: p.url.trim() }} />}
+            <Text
+              label="Caption"
+              value={p.caption}
+              onChange={(e) => update({ ...fields, newPhotos: fields.newPhotos.map((x, j) => (j === i ? { ...x, caption: e.target.value } : x)) })}
+              max={config.limits.form.caption}
+              hint="e.g. Ready to serve"
+              optional
+            />
+            <button type="button" className="link" onClick={() => update({ ...fields, newPhotos: fields.newPhotos.filter((_, j) => j !== i) })}>
+              Remove this photo
+            </button>
+          </div>
+        ))}
+        {fields.newPhotos.length < photoSlots ? (
+          <button type="button" className="button secondary" onClick={() => update({ ...fields, newPhotos: [...fields.newPhotos, { url: "", caption: "" }] })}>
+            + Add a photo
+          </button>
+        ) : (
+          photoSlots <= 0 && <p className="muted">This recipe has the most photos it can have ({config.limits.photos.perRecipe}).</p>
+        )}
+        {(fields.newPhotos.length > 0 || photoSlots > 0) && (
+          <p className="hint">
+            Only link to photos you took or have permission to share, and please don't show people who haven't agreed. Once a photo is in the
+            booklet, only the organisers can remove it.
+          </p>
+        )}
+      </fieldset>
+
       {recipe?.form.values.other && (
         <div className="field">
           <span className="label">Other notes already in this recipe</span>
@@ -506,6 +606,12 @@ function RecipeEditor({ id, config, onDone }: { id?: string; config: Config; onD
       {status?.mine && (
         <details className="mine" open>
           <summary>Your version</summary>
+          {status.mine.newPhotos.filter((p) => p.url.trim()).map((p, i) => (
+            <div key={`np${i}`}>
+              <strong>New photo {i + 1}</strong>
+              <p className="pre">{p.url}{p.caption ? `\n${p.caption}` : ""}</p>
+            </div>
+          ))}
           {(["headChef", "helpers", "serves", "cost", "ingredients", "method", "tips", "story"] as const).map((k) =>
             status.mine![k] ? (
               <div key={k}>
@@ -540,6 +646,8 @@ const LABELS: Record<keyof Fields, string> = {
   method: "Method",
   tips: "Tips & substitutions",
   story: "Story",
+  photoCaptions: "Photo captions",
+  newPhotos: "New photos",
 };
 
 type OnChange = (e: { target: { value: string } }) => void;

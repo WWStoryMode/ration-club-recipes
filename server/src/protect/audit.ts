@@ -21,6 +21,7 @@ export interface AuditEntry {
   before?: string[]; // text parts before the write
   after?: string[]; // text parts after the write
   attempted?: string[]; // what the visitor sent, when it wasn't written (truncated)
+  photos?: string[]; // photo links added (or proposed)
   pendingId?: string; // approval queue item
   note?: string; // organiser's note on a decision
 }

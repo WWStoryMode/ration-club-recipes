@@ -11,9 +11,10 @@ import { noAudit, truncate, type AuditEntry, type AuditLog } from "./protect/aud
 import { clientIp } from "./protect/clientIp.js";
 import { RateLimiter } from "./protect/rateLimit.js";
 import { noHumanCheck, type HumanCheck } from "./protect/turnstile.js";
+import { PHOTO_LIMITS } from "./photos.js";
 import { FORM_LIMITS } from "./recipeForm.js";
 import { isPendingId, type PendingChange, type PendingQueue } from "./queue.js";
-import type { RecipesService, SectionView } from "./recipes.js";
+import type { NewPhoto, PhotoAppend, RecipesService, SectionView } from "./recipes.js";
 import { LIMITS } from "./validate.js";
 
 /** Name of the hidden form field. People never see or fill it; bots that fill every field do. */
@@ -42,6 +43,10 @@ const Form = z.object({
   method: lines,
   tips: lines,
   story: field(FORM_LIMITS.story),
+  /** A caption for each photo already in the recipe, in order. */
+  photos: z.array(z.object({ caption: field(FORM_LIMITS.caption) })).max(PHOTO_LIMITS.perRecipe * 2).default([]),
+  /** Links for new photos, each with a caption. */
+  newPhotos: z.array(z.object({ url: z.string().max(PHOTO_LIMITS.url * 2), caption: field(FORM_LIMITS.caption) })).max(PHOTO_LIMITS.perSave * 2).default([]),
 });
 const SaveForm = z.object({
   baseRev: z.string().regex(/^[0-9a-f]{12}$/, "baseRev must be the 12-character rev you loaded"),
@@ -131,14 +136,15 @@ export interface AppDeps {
 
 /**
  * Only our own files, plus Cloudflare Turnstile's script and frame. Styles allow 'unsafe-inline' because the
- * Turnstile script styles its own frame. No other origin can run code, be framed, or receive form posts.
+ * Turnstile script styles its own frame. Images may come from any https site: recipe photos are links to pictures
+ * hosted elsewhere. No other origin can run code, be framed, or receive form posts.
  */
 const CSP = {
   defaultSrc: ["'self'"],
   scriptSrc: ["'self'", "https://challenges.cloudflare.com"],
   frameSrc: ["https://challenges.cloudflare.com"],
   styleSrc: ["'self'", "'unsafe-inline'"],
-  imgSrc: ["'self'", "data:"],
+  imgSrc: ["'self'", "data:", "https:"],
   connectSrc: ["'self'"],
   objectSrc: ["'none'"],
   baseUri: ["'self'"],
@@ -207,7 +213,7 @@ export function createApp(deps: AppDeps) {
       turnstileSiteKey: p.humanCheck.siteKey,
       honeypotField: HONEYPOT_FIELD,
       requiresApproval: !!deps.queue,
-      limits: { sectionChars: LIMITS.sectionChars, titleChars: LIMITS.titleChars, links: LIMITS.links, form: FORM_LIMITS },
+      limits: { sectionChars: LIMITS.sectionChars, titleChars: LIMITS.titleChars, links: LIMITS.links, form: FORM_LIMITS, photos: { perSave: PHOTO_LIMITS.perSave, perRecipe: PHOTO_LIMITS.perRecipe } },
     }),
   );
 
@@ -216,13 +222,13 @@ export function createApp(deps: AppDeps) {
   app.get("/api/recipes/:id", async (c) => c.json({ recipe: await deps.recipes.getRecipe(sectionId(c.req.param("id"))) }));
 
   /** Save (or, with the approval queue, queue) new text parts for a section. Shared by the section and form routes. */
-  async function saveTexts(c: Context, entry: AuditEntry, id: string, baseRev: string, parts: string[]): Promise<Response> {
-    Object.assign(entry, { sectionId: id, baseRev, attempted: truncate(parts) });
+  async function saveTexts(c: Context, entry: AuditEntry, id: string, baseRev: string, parts: string[], append?: PhotoAppend): Promise<Response> {
+    Object.assign(entry, { sectionId: id, baseRev, attempted: truncate(parts), photos: append?.photos.map((p) => p.url) });
 
     if (deps.queue) {
       const chk = await deps.recipes.checkSection(id, baseRev, parts);
       Object.assign(entry, { recipeId: chk.recipe.id, recipe: chk.recipe.title, before: texts(chk.before) });
-      if (!chk.changed) {
+      if (!chk.changed && !append) {
         Object.assign(entry, { outcome: "unchanged", attempted: undefined });
         return c.json({ section: chk.before });
       }
@@ -237,12 +243,13 @@ export function createApp(deps: AppDeps) {
         baseRev,
         before: texts(chk.before),
         texts: chk.texts,
+        ...(append ? { photos: append.photos } : {}),
       });
       Object.assign(entry, { outcome: "queued", pendingId: item.id, attempted: chk.texts });
       return c.json({ pending: { id: item.id }, message: QUEUED_MESSAGE }, 202);
     }
 
-    const r = await deps.recipes.saveSection(id, baseRev, parts);
+    const r = await deps.recipes.saveSection(id, baseRev, parts, append);
     Object.assign(entry, {
       outcome: r.changed ? "saved" : "unchanged",
       recipeId: r.recipe.id,
@@ -266,8 +273,8 @@ export function createApp(deps: AppDeps) {
   app.put("/api/recipes/:id", (c) =>
     guardedWrite(c, "save_section", SaveForm, async (b, entry) => {
       const id = sectionId(c.req.param("id"));
-      const parts = await deps.recipes.formTexts(id, b.baseRev, b.form);
-      return saveTexts(c, entry, id, b.baseRev, parts);
+      const { parts, append } = await deps.recipes.formSave(id, b.baseRev, b.form);
+      return saveTexts(c, entry, id, b.baseRev, parts, append);
     }, { sectionId: c.req.param("id").slice(0, 64) }),
   );
 
@@ -275,15 +282,24 @@ export function createApp(deps: AppDeps) {
     guardedWrite(c, "add_recipe", AddRecipe, async (b, entry) => {
       const markdown = b.form ? deps.recipes.formBody(b.form) : b.markdown;
       Object.assign(entry, { recipe: b.title.slice(0, 200), attempted: truncate([markdown]) });
+      const chk = await deps.recipes.checkNewRecipe(b.title, markdown); // name and text first, before fetching photo links
+      const append = await deps.recipes.photoAppend(b.form?.newPhotos ?? [], 0);
+      if (append) entry.photos = append.photos.map((p) => p.url);
 
       if (deps.queue) {
-        const chk = await deps.recipes.checkNewRecipe(b.title, markdown);
-        const item = await deps.queue.add({ kind: "add_recipe", requestId: entry.requestId, ipHash: entry.ipHash, title: chk.title, markdown: chk.markdown });
+        const item = await deps.queue.add({
+          kind: "add_recipe",
+          requestId: entry.requestId,
+          ipHash: entry.ipHash,
+          title: chk.title,
+          markdown: chk.markdown,
+          ...(append ? { photos: append.photos } : {}),
+        });
         Object.assign(entry, { outcome: "queued", recipe: chk.title, pendingId: item.id, attempted: [chk.markdown] });
         return c.json({ pending: { id: item.id }, message: QUEUED_MESSAGE }, 202);
       }
 
-      const r = await deps.recipes.addRecipe(b.title, markdown);
+      const r = await deps.recipes.addRecipe(b.title, markdown, append);
       Object.assign(entry, { outcome: "added", recipeId: r.id, sectionId: r.id, recipe: r.title, after: [markdown], attempted: undefined });
       chat.notify(undefined, chatText.added(r.title, false));
       return c.json({ recipe: r }, 201);
@@ -366,14 +382,15 @@ function mountAdmin(app: Hono, deps: AppDeps & { queue: PendingQueue; adminToken
         const it = await item(c.req.param("id"));
         let res: Response;
         if (it.kind === "save_section") {
-          Object.assign(entry, { sectionId: it.sectionId, recipeId: it.recipeId, recipe: it.recipe, baseRev: it.baseRev, attempted: truncate(it.texts) });
-          const r = await deps.recipes.saveSection(it.sectionId, overwrite ? null : it.baseRev, it.texts);
+          Object.assign(entry, { sectionId: it.sectionId, recipeId: it.recipeId, recipe: it.recipe, baseRev: it.baseRev, attempted: truncate(it.texts), photos: it.photos?.map((x) => x.url) });
+          const append = await approvedPhotos(deps.recipes, it.photos, it.recipeId);
+          const r = await deps.recipes.saveSection(it.sectionId, overwrite ? null : it.baseRev, it.texts, append);
           Object.assign(entry, { outcome: r.changed ? "saved" : "unchanged", newRev: r.section.rev, before: texts(r.before), after: texts(r.section), attempted: undefined });
           if (r.changed) chat.notify(r.recipe.id, chatText.updated(r.recipe.title, r.section.title, true));
           res = c.json({ approved: it.id, section: r.section });
         } else {
-          Object.assign(entry, { recipe: it.title, attempted: truncate([it.markdown]) });
-          const r = await deps.recipes.addRecipe(it.title, it.markdown);
+          Object.assign(entry, { recipe: it.title, attempted: truncate([it.markdown]), photos: it.photos?.map((x) => x.url) });
+          const r = await deps.recipes.addRecipe(it.title, it.markdown, await approvedPhotos(deps.recipes, it.photos));
           Object.assign(entry, { outcome: "added", recipeId: r.id, sectionId: r.id, recipe: r.title, after: [it.markdown], attempted: undefined });
           chat.notify(undefined, chatText.added(r.title, true));
           res = c.json({ approved: it.id, recipe: r });
@@ -406,4 +423,14 @@ function mountAdmin(app: Hono, deps: AppDeps & { queue: PendingQueue; adminToken
       return c.json({ rejected: it.id });
     }),
   );
+}
+
+/**
+ * Photo links in a queued change are checked again when approved: the picture behind a link can change while it waits.
+ * The per-recipe limit counts the photos the recipe has now.
+ */
+async function approvedPhotos(recipes: RecipesService, photos: NewPhoto[] | undefined, recipeId?: string): Promise<PhotoAppend | undefined> {
+  if (!photos?.length) return undefined;
+  const existing = recipeId ? (await recipes.getRecipe(recipeId)).form.values.photos.length : 0;
+  return recipes.photoAppend(photos, existing);
 }
