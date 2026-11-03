@@ -7,6 +7,7 @@
     "start": "tsx --env-file-if-exists=../.env src/index.ts",
     "login": "tsx --env-file-if-exists=../.env src/scripts/login.ts",
     "export-login": "tsx --env-file-if-exists=../.env src/scripts/exportLogin.ts",
+    "audit-log": "tsx --env-file-if-exists=../.env src/scripts/auditLog.ts",
     "check": "tsx --env-file-if-exists=../.env src/scripts/check.ts",
     "token-info": "tsx --env-file-if-exists=../.env src/scripts/tokenInfo.ts",
     "create-test-doc": "tsx --env-file-if-exists=../.env src/scripts/createTestDoc.ts",

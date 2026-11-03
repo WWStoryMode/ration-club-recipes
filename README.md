@@ -12,9 +12,9 @@ docs.plus MCP only lets a signed-in person edit documents they **own**. So the b
 login for the owner and acts as them. The browser never talks to docs.plus: MCP requests carrying a
 browser `Origin` header are refused with 403.
 
-> **Status: Phase 3.** Backend API (`server/`), made safe to run as **one always-on server**: token refresh
-> guard, one-instance lock, and a login bundle for the host. Not built yet: full input clean-up, abuse protection,
-> front end, deploy config, `/health`.
+> **Status: Phase 4a.** Backend API (`server/`) for **one always-on server**, with abuse protection: input
+> cleaning, rate limits, Cloudflare Turnstile, a honeypot and an audit log. Not built yet: approval queue and chat
+> summaries (4b), front end, deploy config, `/health`.
 
 ## Setup
 
@@ -38,6 +38,7 @@ pnpm test
 | `pnpm run login` | One-time OAuth sign-in to docs.plus. Opens your browser. Safe to rerun. `-- --force` signs in again from scratch. |
 | `pnpm check` | Read-only: lists the MCP tools and your documents, prints `OWNER: yes/no` for `DOC_SLUG`, and prints its outline. |
 | `pnpm token-info` | Shows token facts (has refresh token, expiry). Never prints tokens. `-- --refresh` tests a refresh and whether it rotates. `-- --expire-now` (testing) marks the access token expired, so a running server refreshes on its next call. |
+| `pnpm audit-log` | Recent write attempts from the audit log: time, outcome, recipe, IP hash, reason. `-- --tail 50`, `-- --day 2026-11-03`, `-- --full` (whole entries, with before/after text). |
 | `pnpm export-login` | Prints the login in `SECRETS_DIR` as one secret bundle for the host's `DOCSPLUS_LOGIN_BUNDLE`. See [Hosting](#hosting-one-server). |
 | `pnpm create-test-doc` | Creates the fictional TEST doc from `server/src/seed/testRecipes.ts`, owned by the signed-in account, and sets `DOC_SLUG` in `.env`. Reuses an existing test doc. `-- --new` forces another. |
 | `pnpm capture-fixtures` | Read-only. Regenerates `server/test/fixtures.ts` from `DOC_SLUG`, and refuses unless that doc is yours. |
@@ -95,6 +96,51 @@ The real cause is logged on the server only.
 Reads are cached for 10 seconds, and every write clears the cache. docs.plus allows 60 tool calls a minute for the
 whole app, because every visitor acts as the one owner account.
 
+## Protection
+
+Every write (`PUT /api/sections/:id`, `POST /api/recipes`) passes these checks, in order:
+
+1. **Rate limits:** per visitor IP, then for the whole app. Over the limit → `429` with `Retry-After`. These requests aren't audited, so a flood can't fill the disk.
+2. **Honeypot:** a hidden form field (`website`, from `GET /api/config`). People never fill it; bots that fill every field do. → `422`.
+3. **Cloudflare Turnstile:** the page sends `turnstileToken`, and the server checks it with Cloudflare. → `422` if it's missing, failed or expired. If Cloudflare can't be reached → `503`.
+4. **Input cleaning** (`server/src/validate.ts`):
+   - Text is normalised to Unicode NFC, and invisible control, zero-width and **text-direction** characters are removed, so they can't hide content or slip past the rules.
+   - Refused: headings, images, `[image]`-style placeholders, a link alone on a line, code blocks, HTML, links that aren't `https://`/`mailto:` (`javascript:`, `data:`, relative…), more than 5 links, and more than 20,000 characters.
+5. The write itself (lock, `baseRev` check, …), then **one audit line**.
+
+| Limit | Default | Setting |
+|---|---|---|
+| Saves per visitor | 10 per 10 min | `RATE_WRITES_PER_IP=10/600` |
+| Reads per visitor | 120 per min | `RATE_READS_PER_IP=120/60` |
+| All saves together | 30 per min | `RATE_WRITES_GLOBAL=30/60`. This protects docs.plus's 60 calls/min for the whole app. |
+
+Limits are counted in memory, which is right for one server. They reset when it restarts.
+
+**Visitor IP.** Set `CLIENT_IP_HEADER` to the header **your host** sets: `fly-client-ip` on Fly, or
+`x-forwarded-for` on Railway/Render (the right-most entry is used, because the host appends it). Never name a header
+your host doesn't overwrite, or visitors could fake their IP and dodge the limits. Locally, leave it empty.
+
+**Turnstile.** Create a widget at Cloudflare (dashboard → Turnstile) for your site's hostname, then set:
+- `TURNSTILE_SITE_KEY`, which is public and goes to the page;
+- `TURNSTILE_SECRET`, which is secret and stays on the host;
+- optionally `TURNSTILE_HOSTNAMES=recipes.example.org`.
+
+With `NODE_ENV=production`, the server **refuses to start** without `TURNSTILE_SECRET`, unless you set
+`TURNSTILE_DISABLED=1` on purpose. Cloudflare's test keys (`1x00000000000000000000AA` /
+`1x0000000000000000000000000000000AA`) always pass and are fine for local development.
+
+**Audit log.**
+- Format: one JSON line per write attempt, in `DATA_DIR/audit-YYYY-MM-DD.jsonl`. It's append-only, the folder is mode 0700 and the files 0600.
+- Each line holds:
+  - time and request id (also sent as `X-Request-Id`)
+  - action and outcome (`saved`, `unchanged`, `added`, `conflict`, `refused`, `blocked`, `failed`) with the reason
+  - recipe and section, base and new rev
+  - the text **before and after**; for refused attempts, what was attempted, truncated to 2,000 characters
+- **No IP addresses**, only `ipHash`: an HMAC of the IP with a secret salt (`AUDIT_SALT`, or generated once into
+  `DATA_DIR/audit-salt`). The same visitor gets the same hash, so floods can be spotted, but the IP can't be read back.
+- `DATA_DIR` must be on the persistent disk in production (e.g. `/data/audit`). The log holds visitor text, so treat
+  it as private. A failed audit write is logged as an error and doesn't block the visitor's save.
+
 ## The login flow
 
 1. `pnpm run login` starts a one-shot callback server on `127.0.0.1:8787`.
@@ -122,7 +168,9 @@ until the token is revoked.
 - A **gitleaks** pre-commit hook (`.husky/pre-commit`, rules in `.gitleaks.toml`) blocks commits containing tokens. It refuses to commit if gitleaks is not installed.
 - `.github/CODEOWNERS` marks the hook, package and secret-scanning files as needing the owner's review. Review any change to `.husky/` or `prepare` scripts carefully: they run on your machine.
 - **Enable GitHub secret scanning push protection** on the repo: Settings › Code security › Secret Protection › Push protection.
-- All MCP calls are server-side. Visitors never get a token and can only reach the narrow API the backend exposes. Rate limiting, Turnstile, an audit log and input cleaning come in later phases.
+- All MCP calls are server-side. Visitors never get a token and can only reach the narrow API the backend exposes,
+  behind rate limits, a honeypot, Turnstile and input cleaning. See [Protection](#protection).
+- The audit log (`DATA_DIR`) holds what visitors wrote, but no IP addresses, only salted hashes. Treat the folder as private.
 - docs.plus treats document text as data. The app parses it and never acts on it as instructions.
 - Scripts print token *facts* (expiry, a short SHA-256 prefix), never token values.
 
@@ -165,6 +213,8 @@ Railway, Fly or Render all work. The requirements:
 - **A persistent disk** mounted at `SECRETS_DIR` (e.g. `SECRETS_DIR=/data/secrets`). Without it, every
   redeploy loses the rotated token and you'd have to sign in again.
 - `HOST=0.0.0.0`, and `PORT` as the platform requires. `DOC_SLUG` = the booklet to edit.
+- `NODE_ENV=production`, `DATA_DIR` on the same disk (e.g. `/data/audit`), `CLIENT_IP_HEADER`, and the Turnstile keys.
+  See [Protection](#protection).
 
 **Getting the login onto the server.** Use a **separate** docs.plus session for the server, so your laptop and
 the server never share a rotating token:
