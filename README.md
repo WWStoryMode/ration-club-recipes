@@ -12,8 +12,8 @@ docs.plus MCP only lets a signed-in person edit documents they **own**. So the b
 login for the owner and acts as them. The browser never talks to docs.plus: MCP requests carrying a
 browser `Origin` header are refused with 403.
 
-> **Status: Phase 1.** Auth plumbing, `login` / `check` / `token-info` scripts, and the typed
-> docs.plus wrapper with parser tests. No API routes or UI yet.
+> **Status: Phase 2.** Backend API (`server/`) on top of the Phase 1 auth and docs.plus wrapper.
+> Not built yet: Redis lock and token store (serverless), full input clean-up, abuse protection, front end, `/health`.
 
 ## Setup
 
@@ -33,6 +33,7 @@ pnpm test
 
 | Command | What it does |
 |---|---|
+| `pnpm dev:server` | API on http://localhost:3000, reloads on change. Uses `DOC_SLUG`, which defaults to the test doc. |
 | `pnpm run login` | One-time OAuth sign-in to docs.plus. Opens your browser. Safe to rerun. `-- --force` signs in again from scratch. |
 | `pnpm check` | Read-only: lists the MCP tools and your documents, prints `OWNER: yes/no` for `DOC_SLUG`, and prints its outline. |
 | `pnpm token-info` | Shows token facts (has refresh token, expiry). Never prints tokens. `-- --refresh` tests a refresh and whether it rotates. |
@@ -51,6 +52,46 @@ lines, bold Ingredients / Method paragraphs, a date) with made-up names, so no r
 this repo. Like every docs.plus document it is public, so anyone can find and edit it.
 
 To change the test data, edit `testRecipes.ts`, run `pnpm create-test-doc -- --new`, then `pnpm capture-fixtures`.
+
+## API
+
+All JSON. Errors are `{ "error": { "code", "message", … } }`, and `message` is plain language that is safe to show visitors.
+
+| Route | What it does |
+|---|---|
+| `GET /api/recipes` | Recipes (the direct children of the booklet's `#` heading), with their subsections. |
+| `GET /api/recipes/:id` | One recipe: `fields` (head chef, support, date) and `sections` (the recipe, then its subsections). Each section has a `rev` and `parts`: text parts are editable, media parts (`{type:"media", kind:"image"}`) are fixed. |
+| `PUT /api/sections/:id` | Body `{ baseRev, texts }`. Send one string per text part, in order, plus the `rev` you loaded. Returns the updated section with its new `rev`. |
+| `POST /api/recipes` | Body `{ title, markdown? }`. Appends `### **Title**` + body at the end of the booklet. An empty body gets the Head Chef / Support / Ingredients / Method template. Returns 201. |
+
+**How saving works:** the server takes a per-document lock, then re-reads the section. If its rev isn't
+`baseRev`, someone else changed it, so it answers **409** with the latest version and writes nothing. Otherwise it
+writes only the text parts that changed, last part first so block numbers stay valid, and re-reads after each
+edit, since `edit_blocks` returns no rev. A stale rev from docs.plus gets one retry, which repeats the `baseRev`
+check. Media blocks are never in an edited range.
+
+**What visitors can't submit:** headings (they'd create permanent sections), images, `[image]`-style
+placeholders, a link alone on a line (it becomes an embed), code blocks/diagrams, HTML, and text over 20,000
+characters per section. Titles are 1–100 characters without markdown symbols, and must be unique
+(case-insensitive). Adding a recipe is refused if anything other than the booklet is the last top-level section,
+or the recipe would land under the wrong heading.
+
+**Error codes:**
+
+| Code | HTTP | Meaning |
+|---|---|---|
+| `invalid` | 422 | Bad input, or docs.plus refused it |
+| `not_found` | 404 | No such recipe or section |
+| `conflict` | 409 | Changed by someone else (`latest` included), or a duplicate title |
+| `rate_limited` | 429 | Too many requests |
+| `unconfirmed` | 503 | "Could not confirm the write". Not retried, to avoid saving twice |
+| `unavailable` | 503 | Login missing or expired, not the owner, or unexpected doc structure |
+| `internal` | 500 | Something else went wrong |
+
+The real cause is logged on the server only.
+
+Reads are cached for 10 seconds, and every write clears the cache. docs.plus allows 60 tool calls a minute for the
+whole app, because every visitor acts as the one owner account.
 
 ## The login flow
 
