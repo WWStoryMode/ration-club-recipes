@@ -8,6 +8,8 @@
     "token-info": "tsx --env-file-if-exists=../.env src/scripts/tokenInfo.ts",
     "create-test-doc": "tsx --env-file-if-exists=../.env src/scripts/createTestDoc.ts",
     "capture-fixtures": "tsx --env-file-if-exists=../.env src/scripts/captureFixtures.ts",
+    "write-test": "tsx --env-file-if-exists=../.env src/scripts/writeTest.ts",
+    "format-test": "tsx --env-file-if-exists=../.env src/scripts/formatTest.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },

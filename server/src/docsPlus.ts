@@ -44,7 +44,7 @@ export interface Section {
   blocks: Block[];
 }
 
-export type DocsPlusErrorKind = "stale_rev" | "unconfirmed_write" | "not_owner" | "rate_limited" | "other";
+export type DocsPlusErrorKind = "stale_rev" | "unconfirmed_write" | "not_owner" | "rate_limited" | "invalid_input" | "other";
 
 export class DocsPlusError extends Error {
   constructor(
@@ -109,8 +109,11 @@ export function flattenOutline(nodes: OutlineNode[]): OutlineNode[] {
   return nodes.flatMap((n) => [n, ...flattenOutline(n.children)]);
 }
 
-/** Placeholders read_document uses for media. A block holding one cannot be removed by edit_blocks. */
-export const MEDIA_PLACEHOLDER = /\[(image|youtube|video|audio|vimeo|embed|iframe|tweet|twitter|map|pdf|file)\]/i;
+/**
+ * Placeholders read_document uses for media. A block holding one cannot be removed by edit_blocks.
+ * Real reads escape the brackets ("\\[image\\]", measured 2026-11-03), so both forms are matched.
+ */
+export const MEDIA_PLACEHOLDER = /\\?\[(image|youtube|video|audio|vimeo|embed|iframe|tweet|twitter|map|pdf|file)\\?\]/i;
 
 /** "### **Pasta Bake**" → "Pasta Bake". */
 export function stripHeading(md: string): string {
@@ -177,17 +180,21 @@ export function parseSection(text: string): Section {
 export function parseRevFromReplace(result: { structuredContent?: unknown; text?: string }): string | undefined {
   const sc = result.structuredContent as { rev?: unknown } | undefined;
   if (sc && typeof sc.rev === "string") return sc.rev;
-  return /\brev\b\W{0,3}([0-9a-f]{12})\b/i.exec(result.text ?? "")?.[1];
+  // Real text: 'Replaced text in "<slug>" (version 7). The section's rev is now 4d14c76ee7bf.'
+  return /\brev\b(?:\W{0,3}|\s+is\s+now\s+)([0-9a-f]{12})\b/i.exec(result.text ?? "")?.[1];
 }
 
 /**
- * Map tool error text to a kind. Only "stale_rev" and "unconfirmed_write" use known wording.
- * The other patterns are best guesses, to be tightened once real error texts are seen.
+ * Map tool error text to a kind. "stale_rev" wording was confirmed by `pnpm write-test` (2026-11-02).
+ * "unconfirmed_write" comes from the server source. "not_owner" and "rate_limited" are still best guesses,
+ * since they can't be triggered safely. Input refusals (old_text missing or ambiguous, bad headings)
+ * all start with the argument name ("old_text: …", "markdown: …") and map to "invalid_input".
  */
 export function classifyToolError(text: string): DocsPlusErrorKind {
   if (/section changed since you read it/i.test(text)) return "stale_rev";
   if (/could not confirm the write/i.test(text)) return "unconfirmed_write";
   if (/rate limit|too many (requests|tool calls)|\b429\b/i.test(text)) return "rate_limited";
+  if (/^(old_text|new_text|markdown|after_block|remove_blocks|section_id|title): /.test(text)) return "invalid_input";
   if (/owned by another|not (the |its )?owner|only (edit|change).{0,40}(you own|own)|you do not own|don't own/i.test(text)) return "not_owner";
   return "other";
 }
@@ -234,6 +241,9 @@ interface ToolResult {
 }
 
 export class DocsPlus {
+  /** The last raw tool result (text + structuredContent), kept for diagnostics and the write test. */
+  lastResult?: ToolResult & { tool: string; isError: boolean };
+
   constructor(
     private readonly client: Client,
     readonly slug: string,
@@ -243,6 +253,7 @@ export class DocsPlus {
     const res = await this.client.callTool({ name, arguments: args });
     const content = (res.content ?? []) as Array<{ type: string; text?: string }>;
     const text = content.filter((c) => c.type === "text").map((c) => c.text ?? "").join("\n");
+    this.lastResult = { tool: name, isError: !!res.isError, text, structuredContent: res.structuredContent };
     if (res.isError) throw new DocsPlusError(classifyToolError(text), name, text || `${name} failed`);
     return { text, structuredContent: res.structuredContent };
   }

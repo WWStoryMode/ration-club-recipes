@@ -10,6 +10,8 @@
     "token-info": "pnpm --filter server run token-info",
     "create-test-doc": "pnpm --filter server run create-test-doc",
     "capture-fixtures": "pnpm --filter server run capture-fixtures",
+    "write-test": "pnpm --filter server run write-test",
+    "format-test": "pnpm --filter server run format-test",
     "test": "pnpm --filter server run test",
     "typecheck": "pnpm -r typecheck"
   },

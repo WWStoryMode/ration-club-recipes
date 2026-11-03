@@ -56,7 +56,9 @@ async function main() {
     refreshToken: before.refresh_token,
     resource: resource ? new URL(resource) : undefined,
   });
-  await provider.saveTokens(refreshed); // save immediately: the old refresh token may already be dead
+  // Save immediately: the old refresh token may already be dead. The SDK binds stored tokens to the
+  // authorization server ("issuer"); its own refreshes add it, so this manual one must too.
+  await provider.saveTokens({ ...refreshed, issuer: info.authorizationServerUrl });
 
   console.log("\nREFRESH");
   console.log(`  new access token:      ${refreshed.access_token !== before.access_token ? "yes" : "no"}`);
