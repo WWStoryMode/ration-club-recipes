@@ -10,6 +10,7 @@
     "login": "pnpm --filter server run login",
     "export-login": "pnpm --filter server run export-login",
     "audit-log": "pnpm --filter server run audit-log",
+    "queue": "pnpm --filter server run queue",
     "check": "pnpm --filter server run check",
     "token-info": "pnpm --filter server run token-info",
     "create-test-doc": "pnpm --filter server run create-test-doc",

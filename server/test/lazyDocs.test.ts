@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { NeedsLoginError } from "../src/auth/DocsPlusOAuthProvider.js";
 import { DocsPlusError } from "../src/docsPlus.js";
 import { LazyDocs } from "../src/lazyDocs.js";
+import type { ChatPort } from "../src/chat.js";
 import type { DocsPort } from "../src/recipes.js";
 import { MemoryStore } from "./memoryStore.js";
 
@@ -18,7 +19,7 @@ function setup(failures: unknown[]) {
       if (f) throw f;
       return { slug: "s", ownedByYou: true, nodes: [] };
     },
-  } as unknown as DocsPort;
+  } as unknown as DocsPort & ChatPort;
   const lazy = new LazyDocs("s", {
     store: new MemoryStore(),
     refresher: { ensureFresh: async () => void refreshes++ },

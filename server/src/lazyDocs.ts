@@ -7,9 +7,11 @@ import type { TokenStore } from "./auth/TokenStore.js";
 import { config } from "./config.js";
 import { DocsPlus, DocsPlusError } from "./docsPlus.js";
 import { connect as realConnect, defaultStore, makeProvider } from "./mcp.js";
+import type { ChatPort } from "./chat.js";
 import type { DocsPort } from "./recipes.js";
 
-type Connect = () => Promise<{ client: Client; dp: DocsPort }>;
+type Port = DocsPort & ChatPort;
+type Connect = () => Promise<{ client: Client; dp: Port }>;
 
 /** docs.plus answered 401: it did NOT run the call, so retrying (even a write) is safe. */
 export function isUnauthorized(err: unknown): boolean {
@@ -24,8 +26,8 @@ export function isUnauthorized(err: unknown): boolean {
  * - A 401-type failure is retried once on the same connection. Any other non-docs.plus failure (network,
  *   transport) drops the connection so the next call reconnects.
  */
-export class LazyDocs implements DocsPort {
-  private conn?: Promise<{ client: Client; dp: DocsPort }>;
+export class LazyDocs implements Port {
+  private conn?: Promise<{ client: Client; dp: Port }>;
   private readonly connectFn: Connect;
   private readonly refresher?: Pick<TokenRefresher, "ensureFresh">;
 
@@ -56,7 +58,7 @@ export class LazyDocs implements DocsPort {
     old?.then(({ client }) => client.close()).catch(() => {});
   }
 
-  private async run<T>(fn: (dp: DocsPort) => Promise<T>): Promise<T> {
+  private async run<T>(fn: (dp: Port) => Promise<T>): Promise<T> {
     await this.refresher?.ensureFresh();
     try {
       return await fn((await this.get()).dp);
@@ -79,4 +81,6 @@ export class LazyDocs implements DocsPort {
   readSection: DocsPort["readSection"] = (id) => this.run((dp) => dp.readSection(id));
   editBlocks: DocsPort["editBlocks"] = (p) => this.run((dp) => dp.editBlocks(p));
   appendRecipe: DocsPort["appendRecipe"] = (t, b, l) => this.run((dp) => dp.appendRecipe(t, b, l));
+  listChatRooms: ChatPort["listChatRooms"] = () => this.run((dp) => dp.listChatRooms());
+  postChatMessage: ChatPort["postChatMessage"] = (id, text) => this.run((dp) => dp.postChatMessage(id, text));
 }

@@ -12,9 +12,9 @@ docs.plus MCP only lets a signed-in person edit documents they **own**. So the b
 login for the owner and acts as them. The browser never talks to docs.plus: MCP requests carrying a
 browser `Origin` header are refused with 403.
 
-> **Status: Phase 4a.** Backend API (`server/`) for **one always-on server**, with abuse protection: input
-> cleaning, rate limits, Cloudflare Turnstile, a honeypot and an audit log. Not built yet: approval queue and chat
-> summaries (4b), front end, deploy config, `/health`.
+> **Status: Phase 4b.** Backend API (`server/`) for **one always-on server**, with abuse protection: input
+> cleaning, rate limits, Cloudflare Turnstile, a honeypot, an audit log, an optional approval queue and optional
+> chat summaries. Not built yet: front end, deploy config, `/health`.
 
 ## Setup
 
@@ -66,6 +66,10 @@ All JSON. Errors are `{ "error": { "code", "message", … } }`, and `message` is
 | `GET /api/recipes/:id` | One recipe: `fields` (head chef, support, date) and `sections` (the recipe, then its subsections). Each section has a `rev` and `parts`: text parts are editable, media parts (`{type:"media", kind:"image"}`) are fixed. |
 | `PUT /api/sections/:id` | Body `{ baseRev, texts }`. Send one string per text part, in order, plus the `rev` you loaded. Returns the updated section with its new `rev`. |
 | `POST /api/recipes` | Body `{ title, markdown? }`. Appends `### **Title**` + body at the end of the booklet. An empty body gets the Head Chef / Support / Ingredients / Method template. Returns 201. |
+| `GET /api/config` | What the page needs: Turnstile site key, honeypot field name, `requiresApproval`, limits. |
+
+With the [approval queue](#approval-queue-optional) on, both writes are checked the same way but answer **202**
+`{ pending: { id }, message }` instead of writing, and the message tells the visitor their change is waiting.
 
 **How saving works:** the server takes a per-document lock, then re-reads the section. If its rev isn't
 `baseRev`, someone else changed it, so it answers **409** with the latest version and writes nothing. Otherwise it
@@ -106,7 +110,7 @@ Every write (`PUT /api/sections/:id`, `POST /api/recipes`) passes these checks, 
 4. **Input cleaning** (`server/src/validate.ts`):
    - Text is normalised to Unicode NFC, and invisible control, zero-width and **text-direction** characters are removed, so they can't hide content or slip past the rules.
    - Refused: headings, images, `[image]`-style placeholders, a link alone on a line, code blocks, HTML, links that aren't `https://`/`mailto:` (`javascript:`, `data:`, relative…), more than 5 links, and more than 20,000 characters.
-5. The write itself (lock, `baseRev` check, …), then **one audit line**.
+5. The write itself (lock, `baseRev` check, …), or with the approval queue on, the same checks and a queued item. Then **one audit line**.
 
 | Limit | Default | Setting |
 |---|---|---|
@@ -133,13 +137,59 @@ With `NODE_ENV=production`, the server **refuses to start** without `TURNSTILE_S
 - Format: one JSON line per write attempt, in `DATA_DIR/audit-YYYY-MM-DD.jsonl`. It's append-only, the folder is mode 0700 and the files 0600.
 - Each line holds:
   - time and request id (also sent as `X-Request-Id`)
-  - action and outcome (`saved`, `unchanged`, `added`, `conflict`, `refused`, `blocked`, `failed`) with the reason
+  - action (`save_section`, `add_recipe`, and the organiser's `approve`/`reject`) and outcome (`saved`, `unchanged`, `added`, `queued`, `rejected`, `conflict`, `refused`, `blocked`, `failed`) with the reason, and the queue item id
   - recipe and section, base and new rev
   - the text **before and after**; for refused attempts, what was attempted, truncated to 2,000 characters
 - **No IP addresses**, only `ipHash`: an HMAC of the IP with a secret salt (`AUDIT_SALT`, or generated once into
   `DATA_DIR/audit-salt`). The same visitor gets the same hash, so floods can be spotted, but the IP can't be read back.
 - `DATA_DIR` must be on the persistent disk in production (e.g. `/data/audit`). The log holds visitor text, so treat
   it as private. A failed audit write is logged as an error and doesn't block the visitor's save.
+
+### Approval queue (optional)
+
+Set `REQUIRE_APPROVAL=1` and nothing a visitor sends reaches the document until an organiser approves it.
+
+- Visitors' changes pass every check above (including a `baseRev` check and a duplicate-name check), then wait as
+  one file each in `DATA_DIR/pending/` (mode 0600, with an IP hash, never an IP). A change that edits nothing isn't queued.
+- At most `QUEUE_PER_IP=10` waiting changes per visitor and `QUEUE_MAX=200` in total, so a flood can't fill the disk. Beyond that → `429`.
+- Organisers use the admin API with `ADMIN_TOKEN` (at least 32 characters: `openssl rand -hex 32`). The server
+  refuses to start with `REQUIRE_APPROVAL=1` and no token. 10 missing or wrong tokens lock that IP out of the admin
+  routes for 10 minutes. Without the queue, the admin routes don't exist.
+- **Approving** writes the change exactly as a direct save would. If the section changed after the visitor loaded
+  it (say, another approved change), approving answers `409` and the item stays queued: reject it, or approve with
+  `overwrite`, which replaces the newer text. **Rejecting** deletes the item and writes nothing.
+- Every decision is audited (`approve`/`reject`, with the item id and any note), so the log shows who proposed what and what happened to it.
+
+From your computer, with the same `ADMIN_TOKEN` (and `API_URL=https://your-host` for a hosted server):
+
+```bash
+pnpm queue                          # list waiting changes
+pnpm queue show 1a2b3c4d            # the text now vs. the proposed text
+pnpm queue approve 1a2b3c4d         # add --overwrite if the section changed since
+pnpm queue reject 1a2b3c4d --note "spam"
+```
+
+| Route (all need `Authorization: Bearer <ADMIN_TOKEN>`) | What it does |
+|---|---|
+| `GET /api/admin/pending` | Waiting changes, oldest first. |
+| `GET /api/admin/pending/:id` | One change; for an edit, also the section's text now and `changedSince`. |
+| `POST /api/admin/pending/:id/approve` | Body `{ overwrite?: boolean }`. Writes it, then removes it from the queue. |
+| `POST /api/admin/pending/:id/reject` | Body `{ note?: string }`. Removes it without writing. |
+
+`ADMIN_TOKEN` is a password for changing your document: keep it only in the host's settings and your own `.env`.
+
+### Chat summaries (optional)
+
+Set `CHAT_SUMMARIES=1` and after each change reaches the document, the server posts one line in the docs.plus chat,
+for example `Recipe updated through Ration Club Recipes: "Mystery Stew" › Method.` (plus "Approved by an organiser."
+when it came through the queue).
+
+- It goes in the recipe's chat room if it has one, otherwise the booklet heading's room. docs.plus only allows
+  posting in a room that already exists, and rooms start the first time someone opens chat on a heading, so
+  **open the chat on the booklet heading once** in docs.plus. With no room, notes are skipped (logged once).
+- Notes name the recipe and section only. They never quote what visitors wrote, so the chat can't be used to spread spam.
+- Best effort: notes are posted in the background, one at a time, never retried (a retry could post twice). A
+  failed note is logged and never fails the save. Each note costs one docs.plus call (plus a room-list call every 5 minutes).
 
 ## The login flow
 
@@ -169,7 +219,8 @@ until the token is revoked.
 - `.github/CODEOWNERS` marks the hook, package and secret-scanning files as needing the owner's review. Review any change to `.husky/` or `prepare` scripts carefully: they run on your machine.
 - **Enable GitHub secret scanning push protection** on the repo: Settings › Code security › Secret Protection › Push protection.
 - All MCP calls are server-side. Visitors never get a token and can only reach the narrow API the backend exposes,
-  behind rate limits, a honeypot, Turnstile and input cleaning. See [Protection](#protection).
+  behind rate limits, a honeypot, Turnstile and input cleaning, and optionally an approval queue. See [Protection](#protection).
+- `ADMIN_TOKEN` (approval queue) can approve any queued change into your document. Keep it out of git, like the tokens, and change it if it may have leaked.
 - The audit log (`DATA_DIR`) holds what visitors wrote, but no IP addresses, only salted hashes. Treat the folder as private.
 - docs.plus treats document text as data. The app parses it and never acts on it as instructions.
 - Scripts print token *facts* (expiry, a short SHA-256 prefix), never token values.
@@ -274,8 +325,13 @@ Measured with `pnpm write-test` on the test doc, 2026-11-02:
 ```
 server/src/auth/   TokenStore interface, FileTokenStore (.secrets/), DocsPlusOAuthProvider, callback server
 server/src/mcp.ts  MCP Client + StreamableHTTPClientTransport (@modelcontextprotocol/sdk 1.32.1, pinned)
-server/src/docsPlus.ts  typed wrapper (getOutline, readSection, editBlocks, replaceText, appendRecipe) + parsers
-server/src/scripts/     login, check, token-info
+server/src/docsPlus.ts  typed wrapper (outline, sections, edits, append, chat) + parsers
+server/src/recipes.ts   RecipesService: list/read/save/add, with check-only variants for the approval queue
+server/src/app.ts       Hono routes: public API, protection pipeline, admin (approval) routes
+server/src/protect/     client IP, rate limits, Turnstile, audit log
+server/src/queue.ts     approval queue (DATA_DIR/pending)
+server/src/chat.ts      optional chat summaries
+server/src/scripts/     login, check, token-info, export-login, audit-log, queue, test-doc tools
 web/               Vite + React (placeholder)
 ```
 

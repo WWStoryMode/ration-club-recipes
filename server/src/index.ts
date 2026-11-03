@@ -1,12 +1,13 @@
 /**
  * Long-running server: ONE instance, with SECRETS_DIR on a persistent disk.
  * Startup: SECRETS_DIR writable → import DOCSPLUS_LOGIN_BUNDLE (only into an empty store) → one-instance lock →
- * protection (Turnstile, rate limits, audit log in DATA_DIR) → serve.
+ * protection (Turnstile, rate limits, audit log in DATA_DIR) → approval queue / chat notes (optional) → serve.
  */
 import { access, chmod, constants, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { serve } from "@hono/node-server";
 import { createApp } from "./app.js";
+import { ChatSummaries } from "./chat.js";
 import { bootstrapLogin } from "./bootstrap.js";
 import { config } from "./config.js";
 import { InstanceLock, InstanceLockError } from "./instanceLock.js";
@@ -16,6 +17,7 @@ import { defaultStore } from "./mcp.js";
 import { FileAuditLog, ipHasher, loadSalt } from "./protect/audit.js";
 import { parseRate, RateLimiter } from "./protect/rateLimit.js";
 import { noHumanCheck, Turnstile, type HumanCheck } from "./protect/turnstile.js";
+import { FilePendingQueue } from "./queue.js";
 import { RecipesService } from "./recipes.js";
 
 /** Turnstile is required in production, unless explicitly switched off with TURNSTILE_DISABLED=1. */
@@ -27,6 +29,24 @@ function humanCheck(): HumanCheck {
   }
   console.warn("[start] Turnstile is OFF: writes are not checked for bots.");
   return noHumanCheck;
+}
+
+/** REQUIRE_APPROVAL needs a strong ADMIN_TOKEN, or nothing could ever be approved. */
+function approval() {
+  const token = config.adminToken;
+  if (token && token.length < 32) throw new Error("ADMIN_TOKEN must be at least 32 characters. Make one with: openssl rand -hex 32");
+  if (!config.requireApproval) {
+    if (token) console.warn("[start] ADMIN_TOKEN is set but REQUIRE_APPROVAL is not: the admin routes are off.");
+    return {};
+  }
+  if (!token) throw new Error("REQUIRE_APPROVAL=1 needs ADMIN_TOKEN (at least 32 characters), so organisers can approve changes. Make one with: openssl rand -hex 32");
+  const count = (v: string | undefined, d: number) => {
+    const n = Number(v ?? d);
+    if (!Number.isInteger(n) || n < 1) throw new Error(`Bad queue limit "${v}": use a whole number`);
+    return n;
+  };
+  console.log("[start] Approval queue is ON: visitors' changes wait for an organiser.");
+  return { queue: new FilePendingQueue(path.join(config.dataDir, "pending"), { max: count(config.queue.max, 200), perIp: count(config.queue.perIp, 10) }), adminToken: token };
 }
 
 function limiter(spec: string | undefined, fallback: string) {
@@ -59,6 +79,8 @@ async function main() {
     },
   };
 
+  const approvalDeps = approval();
+
   const lock = new InstanceLock(path.join(config.secretsDir, "server.lock"), {
     onLost: (by) => {
       console.error(`[lock] another server (host ${by?.host}, pid ${by?.pid}) took over this login. Stopping.`);
@@ -69,8 +91,11 @@ async function main() {
   lock.startHeartbeat();
   try {
     const port = Number(process.env.PORT ?? 3000);
-    const recipes = new RecipesService({ docs: new LazyDocs(config.docSlug, { store }), lock: new InMemoryLock(), slug: config.docSlug });
-    const server = serve({ fetch: createApp({ recipes, protection }).fetch, port, hostname: process.env.HOST ?? "127.0.0.1" }, () => {
+    const docs = new LazyDocs(config.docSlug, { store });
+    const recipes = new RecipesService({ docs, lock: new InMemoryLock(), slug: config.docSlug });
+    const chat = config.chatSummaries ? new ChatSummaries({ chat: docs, booklet: () => recipes.bookletId() }) : undefined;
+    if (chat) console.log("[start] Chat summaries are ON.");
+    const server = serve({ fetch: createApp({ recipes, protection, chat, ...approvalDeps }).fetch, port, hostname: process.env.HOST ?? "127.0.0.1" }, () => {
       console.log(`API on http://localhost:${port}  (doc: ${config.docSlug})`);
     });
     server.on("error", (err) => {

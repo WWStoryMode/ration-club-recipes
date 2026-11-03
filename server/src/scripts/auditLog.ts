@@ -27,7 +27,7 @@ async function main() {
       continue;
     }
     const what = e.recipe ? `"${e.recipe}"` : e.sectionId ?? "";
-    console.log(`${e.ts}  ${e.outcome.padEnd(9)} ${e.action.padEnd(12)} ${what.padEnd(28)} ip#${e.ipHash}${e.reason ? `  (${e.reason})` : ""}`);
+    console.log(`${e.ts}  ${e.outcome.padEnd(9)} ${e.action.padEnd(12)} ${what.padEnd(28)} ip#${e.ipHash}${e.pendingId ? `  pending#${e.pendingId.slice(0, 8)}` : ""}${e.reason ? `  (${e.reason})` : ""}${e.note ? `  note: ${e.note}` : ""}`);
   }
   console.log(`\n${Math.min(tail, lines.length)} of ${lines.length} entries from ${chosen.length} day(s) in ${config.dataDir}`);
 }

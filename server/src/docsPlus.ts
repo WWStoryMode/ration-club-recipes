@@ -311,6 +311,17 @@ export class DocsPlus {
     return rev;
   }
 
+  /** Raw list_chat_rooms text. Rooms start lazily: a heading nobody has opened chat on has no room. */
+  async listChatRooms(): Promise<string> {
+    const res = await this.call("list_chat_rooms", { slug: this.slug });
+    return [res.text, res.structuredContent ? JSON.stringify(res.structuredContent) : ""].join("\n");
+  }
+
+  /** Post plain text in a heading's chat room, as the owner. Never retried: a retry after an unclear failure can post twice. */
+  async postChatMessage(sectionId: string, text: string): Promise<void> {
+    await this.call("post_chat_message", { slug: this.slug, section_id: sectionId, text: text.slice(0, 2000) });
+  }
+
   /** Appends "### Title" + body at the END of the document (append_to_document). */
   async appendRecipe(title: string, bodyMarkdown: string, level = 3): Promise<string> {
     const clean = title.replace(/\s+/g, " ").trim();
