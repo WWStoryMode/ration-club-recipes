@@ -1,10 +1,11 @@
 /**
  * pnpm token-info [--refresh]: what kind of tokens docs.plus issues. Never prints a token, only facts and short hashes.
  * --refresh forces one refresh-token grant, saves the result straight away, and reports whether the refresh token rotated.
+ * --expire-now (testing) marks the access token as expired, so a running server refreshes on its next call.
  * It never reuses an old refresh token, because Supabase revokes the whole token family when a rotated token is reused.
  */
 import { createHash } from "node:crypto";
-import { discoverOAuthServerInfo, refreshAuthorization } from "@modelcontextprotocol/sdk/client/auth.js";
+import { sharedFetch, TokenRefresher } from "../auth/refresh.js";
 import { config } from "../config.js";
 import { connect, defaultStore, makeProvider } from "../mcp.js";
 
@@ -38,34 +39,25 @@ async function describe(label: string) {
 
 async function main() {
   const before = await describe("CURRENT TOKENS");
-  if (!process.argv.includes("--refresh")) {
-    console.log("\nRun with --refresh to test refresh and rotation.");
+
+  if (process.argv.includes("--expire-now")) {
+    // Dev/testing only: pretend the access token is about to expire, so the server's TokenRefresher refreshes on its next call.
+    await store.set("tokens", { ...before, obtained_at: Date.now() - (before.expires_in ?? 3600) * 1000 });
+    console.log("\nMarked the access token as expired. The next API call will refresh it.");
     return;
   }
-  if (!before.refresh_token) throw new Error("No refresh token: refresh cannot be tested.");
-
-  const client = await store.get("client");
-  if (!client) throw new Error("No client registration saved.");
-  const info = (await store.get("discovery")) ?? (await discoverOAuthServerInfo(config.mcpUrl));
-  const resource = info.resourceMetadata?.resource;
+  if (!process.argv.includes("--refresh")) {
+    console.log("\nRun with --refresh to test refresh and rotation, or --expire-now to make the server refresh.");
+    return;
+  }
 
   const provider = makeProvider(store);
-  const refreshed = await refreshAuthorization(info.authorizationServerUrl, {
-    metadata: info.authorizationServerMetadata,
-    clientInformation: client,
-    refreshToken: before.refresh_token,
-    resource: resource ? new URL(resource) : undefined,
-  });
-  // Save immediately: the old refresh token may already be dead. The SDK binds stored tokens to the
-  // authorization server ("issuer"); its own refreshes add it, so this manual one must too.
-  await provider.saveTokens({ ...refreshed, issuer: info.authorizationServerUrl });
+  const { before: oldRt, after: newRt } = await new TokenRefresher({ store, provider, serverUrl: config.mcpUrl, fetch: sharedFetch }).refresh();
+  const after = await store.get("tokens");
 
   console.log("\nREFRESH");
-  console.log(`  new access token:      ${refreshed.access_token !== before.access_token ? "yes" : "no"}`);
-  console.log(`  refresh_token returned: ${refreshed.refresh_token ? "yes" : "no"}`);
-  console.log(
-    `  ROTATION:              ${refreshed.refresh_token && refreshed.refresh_token !== before.refresh_token ? `YES (${h(before.refresh_token)} → ${h(refreshed.refresh_token)})` : "no"}`,
-  );
+  console.log(`  new access token:      ${after?.access_token !== before.access_token ? "yes" : "no"}`);
+  console.log(`  ROTATION:              ${newRt && newRt !== oldRt ? `YES (${h(oldRt)} → ${h(newRt)})` : "no"}`);
   await describe("\nTOKENS AFTER REFRESH");
 
   const { client: mcp } = await connect(provider);

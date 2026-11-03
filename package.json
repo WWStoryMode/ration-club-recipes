@@ -8,6 +8,7 @@
     "dev:server": "pnpm --filter server run dev",
     "dev:web": "pnpm --filter web run dev",
     "login": "pnpm --filter server run login",
+    "export-login": "pnpm --filter server run export-login",
     "check": "pnpm --filter server run check",
     "token-info": "pnpm --filter server run token-info",
     "create-test-doc": "pnpm --filter server run create-test-doc",

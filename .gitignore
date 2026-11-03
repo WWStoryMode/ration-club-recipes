@@ -1,5 +1,5 @@
 # Secrets: OAuth client registration, tokens, PKCE verifier. NEVER commit.
-.secrets/
+.secrets*/
 .env*
 !.env.example
 
