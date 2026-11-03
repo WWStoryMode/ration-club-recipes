@@ -49,9 +49,11 @@ describe("parseOutline", () => {
     const nodes = parseOutline(parseFrame(OUTLINE).body);
     expect(nodes).toHaveLength(1);
     expect(nodes[0]).toMatchObject({ title: TEST_DOC_TITLE, level: 1, depth: 0 });
-    expect(nodes[0]!.children.map((c) => c.title)).toEqual(TEST_RECIPES.map((r) => r.title));
+    // The defined recipes come first; `pnpm write-test` may have appended "Write Test Recipe" after them.
+    const titles = nodes[0]!.children.map((c) => c.title);
+    expect(titles.slice(0, TEST_RECIPES.length)).toEqual(TEST_RECIPES.map((r) => r.title));
+    expect(titles.slice(TEST_RECIPES.length).every((t) => t === "Write Test Recipe")).toBe(true);
     expect(nodes[0]!.children.every((c) => c.level === 3 && c.depth === 1 && c.sectionId && /^[0-9a-f]{12}$/.test(c.rev!))).toBe(true);
-    expect(flattenOutline(nodes)).toHaveLength(1 + TEST_RECIPES.length);
   });
   it("handles none ids/revs, untitled headings, deep nesting and brackets in titles", () => {
     const nodes = parseOutline(
@@ -129,6 +131,21 @@ describe("parseSection (synthetic)", () => {
     ]);
     expect(s.blocks.map((b) => b.isMedia)).toEqual([false, false, true, true, false]);
   });
+  it("flags media in the escaped form real reads use (format-test, 2026-11-03)", () => {
+    const s = parseSection(
+      section(
+        [
+          "### **Format Test Recipe**",
+          "[1] **Head Chef: Chef Echo Edited**",
+          "[2] 3 February 2027",
+          "[3] \\[image\\]",
+          "[4] \\[youtube\\]",
+        ].join("\n\n"),
+      ),
+    );
+    expect(s.blocks.map((b) => b.isMedia)).toEqual([false, false, true, true]);
+    expect(s.blocks[2]!.markdown).toBe("\\[image\\]");
+  });
   it("does not split on a later marker number appearing early", () => {
     const s = parseSection(section("### X\n\n[1] a\n\n[3] not a block\n\n[2] b"));
     expect(s.blocks.map((b) => b.markdown)).toEqual(["a\n\n[3] not a block", "b"]);
@@ -143,10 +160,27 @@ describe("helpers", () => {
     expect(stripHeading("### **Lentil Soup**")).toBe("Lentil Soup");
     expect(stripHeading("## Plain")).toBe("Plain");
   });
+  it("parseRevFromReplace reads the real replace_text reply (text-only fallback too)", () => {
+    const text = 'Replaced text in "ration-club-recipes-test-doc-fictional-data" (version 7). The section\'s rev is now 4d14c76ee7bf.';
+    expect(parseRevFromReplace({ text, structuredContent: { slug: "x", version: 7, rev: "4d14c76ee7bf" } })).toBe("4d14c76ee7bf");
+    expect(parseRevFromReplace({ text })).toBe("4d14c76ee7bf");
+    // edit_blocks and append_to_document reply with rev: null
+    expect(parseRevFromReplace({ text: 'Edited blocks in "x" (version 3).', structuredContent: { version: 3, rev: null } })).toBeUndefined();
+  });
   it("parseRevFromReplace prefers structuredContent", () => {
     expect(parseRevFromReplace({ structuredContent: { rev: "aaaaaaaaaaaa" }, text: "rev: bbbbbbbbbbbb" })).toBe("aaaaaaaaaaaa");
     expect(parseRevFromReplace({ text: "Replaced. New rev: 0123456789ab" })).toBe("0123456789ab");
     expect(parseRevFromReplace({ text: "Replaced." })).toBeUndefined();
+  });
+  it("classifyToolError: real refusal texts captured by pnpm write-test (2026-11-02)", () => {
+    expect(classifyToolError("The section changed since you read it. Call read_document or get_outline again, then retry with the new rev.")).toBe("stale_rev");
+    for (const t of [
+      "old_text: it is not in this section as one stretch of text. Copy it exactly from read_document, without Markdown symbols such as ** or [ ].",
+      "old_text: it appears 2 times in this section. Add nearby words so it appears once.",
+      "markdown: docs.plus refused it (a new heading must be at level 4 or deeper). Fix it and retry.",
+      "markdown: a level-1 heading (#) is the document title. Use ## or deeper.",
+      "remove_blocks: block(s) 4 hold a picture, video or file, and docs.plus never deletes media for an AI app. Choose a range that skips them, or ask the person to change them in docs.plus.",
+    ]) expect(classifyToolError(t)).toBe("invalid_input");
   });
   it("classifyToolError", () => {
     expect(classifyToolError("The section changed since you read it. Read it again.")).toBe("stale_rev");

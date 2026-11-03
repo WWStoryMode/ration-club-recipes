@@ -38,6 +38,8 @@ pnpm test
 | `pnpm token-info` | Shows token facts (has refresh token, expiry). Never prints tokens. `-- --refresh` tests a refresh and whether it rotates. |
 | `pnpm create-test-doc` | Creates the fictional TEST doc from `server/src/seed/testRecipes.ts`, owned by the signed-in account, and sets `DOC_SLUG` in `.env`. Reuses an existing test doc. `-- --new` forces another. |
 | `pnpm capture-fixtures` | Read-only. Regenerates `server/test/fixtures.ts` from `DOC_SLUG`, and refuses unless that doc is yours. |
+| `pnpm write-test` | Runs every write path against the **test doc only** and prints docs.plus's real replies. It refuses any other doc. Edits "Mystery Stew" and restores it. Appends "Write Test Recipe" once, since headings can't be removed. |
+| `pnpm format-test` | Test doc only. On a throwaway "Format Test Recipe": converts bold Ingredients/Method into `####` subsections, adds an image and a YouTube link, and checks how media behaves. Resumable: steps already done are skipped. |
 | `pnpm test` | Parser unit tests (vitest). Checks captured docs.plus responses from the test doc against the recipe definitions. |
 
 ### Test document
@@ -102,6 +104,42 @@ What this means:
   in-process mutex. Without a volume, a redeploy loses the rotated token. Redis is the safer choice either way.
 - If the app is idle longer than the refresh token lives, a login is needed again. The `/health` check
   (later phase) should exercise the token regularly and alert when it fails.
+
+## docs.plus write behaviour (measured)
+
+Measured with `pnpm write-test` on the test doc, 2026-11-02:
+
+- **`replace_text`** returns the new rev, in `structuredContent.rev` and in the text ("The section's rev is now …").
+  Bold survives edits *inside* a bold run (`Charlie` → `Delta`) and full rewrites of the run. **Text appended
+  only at the end of a bold run comes out unbolded** (`**Chef Delta** Tested`). Use `edit_blocks` with full
+  markdown for formatted text, and `replace_text` only for plain wording fixes.
+- **`edit_blocks`** returns `rev: null` (and sometimes `version: null`). Always re-read. Replacing a whole body
+  (`after_block 0`, remove all) works and leaves the heading alone.
+- **Revs are content hashes.** Restoring a section's exact content gives back its old rev, so a rev
+  proves *what the content is*, not that nobody wrote in between.
+- **Refusal texts** start with the argument name (`old_text: …`, `markdown: …`) and are mapped to `invalid_input`:
+  - old_text missing: "it is not in this section as one stretch of text…"
+  - old_text ambiguous: "it appears 2 times in this section…"
+  - heading too shallow: "a new heading must be at level 4 or deeper" (inside a `###` recipe)
+  - `#` heading: "a level-1 heading (#) is the document title"
+- **Stale rev** (both tools): "The section changed since you read it. Call read_document or get_outline again,
+  then retry with the new rev." This maps to `stale_rev`.
+- **`append_to_document`** adds the recipe as a `###` under the doc's `#` heading, as long as no other `#` section comes after it.
+- **Layout changes** (`pnpm format-test`, on "Format Test Recipe", 2026-11-03):
+  - Bold "Ingredients"/"Method" paragraphs can be turned into real `#### Ingredients` / `#### Method`
+    subsections in one `edit_blocks` call. Replace the blocks from "Ingredients" onward, and put anything that
+    should stay in the recipe's own section (like the date) *before* the new headings, since headings must come last.
+    After that, each subsection has its own `section_id` and rev.
+  - Subsections, like all headings, can't be renamed or removed later except by hand in docs.plus.
+- **Media:**
+  - `edit_blocks` turns `![alt](https://…)` into a picture, and a line holding only a YouTube URL into a player.
+    This works in a recipe section and in a `####` subsection. There is no upload: the media must already be online.
+  - It reads back escaped, as `\[image\]` / `\[youtube\]`, not `[image]`. **Text a person typed as "[image]" reads back
+    exactly the same**, so a read alone can't tell them apart. The app treats both as media and never edits them.
+    It should also refuse submitted text containing such placeholders.
+  - Removing media is refused: "remove_blocks: block(s) 4 hold a picture, video or file, and docs.plus never deletes
+    media for an AI app…" (`invalid_input`). Editing the text blocks around media works, and the media stays.
+- Not tested yet: "could not confirm the write", and the not-owner and rate-limit texts.
 
 ## Layout
 
