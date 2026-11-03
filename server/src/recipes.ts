@@ -12,6 +12,7 @@ import {
 } from "./docsPlus.js";
 import { ApiError, MESSAGES } from "./errors.js";
 import type { Lock } from "./lock.js";
+import { formatRecipe, parseRecipe, type RecipeForm } from "./recipeForm.js";
 import { checkTitle, checkVisitorMarkdown, LIMITS, normalizeMarkdown } from "./validate.js";
 
 /** The parts of the docs.plus wrapper the service uses, so tests can swap in a fake. */
@@ -50,7 +51,17 @@ export interface SaveResult {
 export interface RecipeView extends RecipeSummary {
   fields: RecipeFields;
   sections: SectionView[]; // the recipe's own section first, then its subsections in order
+  /** The recipe as form values. `editable: false` (with a reason) when its layout doesn't fit the form. */
+  form: { editable: boolean; reason?: string; rev: string; values: RecipeForm };
 }
+
+/** Form values a visitor may send: everything except `other`, which always comes from the document. */
+export type VisitorForm = Omit<RecipeForm, "other">;
+
+export const FORM_REASONS = {
+  subsections: "This recipe has its own sub-headings, so only the organisers can edit it.",
+  media: "This recipe has pictures or videos, so only the organisers can edit it.",
+};
 
 // ---------------------------------------------------------------------------
 // Segments: runs of text blocks between media blocks
@@ -163,7 +174,41 @@ export class RecipesService {
     if (recipe.sectionId !== id) throw new ApiError("not_found", "That's a part of a recipe, not a recipe. Please reload.");
     const ids = [id, ...this.summary(recipe).subsections.map((s) => s.id)];
     const sections = await Promise.all(ids.map((sid) => this.cached(`section:${sid}`, () => this.o.docs.readSection(sid))));
-    return { ...this.summary(recipe), fields: recipeFields(sections[0]!.blocks), sections: sections.map(sectionView) };
+    const summary = this.summary(recipe);
+    const views = sections.map(sectionView);
+    const reason = summary.subsections.length ? FORM_REASONS.subsections : views[0]!.hasMedia ? FORM_REASONS.media : undefined;
+    return {
+      ...summary,
+      fields: recipeFields(sections[0]!.blocks),
+      sections: views,
+      form: { editable: !reason, ...(reason ? { reason } : {}), rev: sections[0]!.rev, values: parseRecipe(sections[0]!.blocks) },
+    };
+  }
+
+  /**
+   * The text to save for a visitor's form. Reads the recipe as it is now: the baseRev must still match (409 with the
+   * latest version if not), the layout must fit the form, and text that fits no field is carried over from the
+   * document, never taken from the visitor.
+   */
+  async formTexts(recipeId: string, baseRev: string, form: VisitorForm): Promise<string[]> {
+    const outline = await this.outline();
+    const recipe = this.recipeOf(outline, recipeId);
+    if (recipe.sectionId !== recipeId) throw new ApiError("not_found", "That's a part of a recipe, not a recipe. Please reload.");
+    if (flattenOutline(recipe.children).length) throw new ApiError("invalid", FORM_REASONS.subsections);
+    const s = await this.o.docs.readSection(recipeId);
+    if (s.rev !== baseRev) throw new ApiError("conflict", MESSAGES.conflict, { latest: await this.getRecipeFresh(recipeId) });
+    if (s.blocks.some((b) => b.isMedia)) throw new ApiError("invalid", FORM_REASONS.media);
+    return [formatRecipe({ ...form, other: parseRecipe(s.blocks).other })];
+  }
+
+  private async getRecipeFresh(id: string): Promise<RecipeView> {
+    this.invalidate();
+    return this.getRecipe(id);
+  }
+
+  /** The body for a new recipe from form values. */
+  formBody(form: VisitorForm): string {
+    return formatRecipe({ ...form, other: "" });
   }
 
   /** A section as it is now (uncached), for an organiser reviewing a pending change. */

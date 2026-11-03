@@ -1,0 +1,292 @@
+:root {
+  --bg: #fbf8f3;
+  --surface: #ffffff;
+  --text: #2b2520;
+  --muted: #6b625a;
+  --line: #e4ddd3;
+  --accent: #b5501d;
+  --accent-ink: #ffffff;
+  --ok-bg: #e8f4ea;
+  --ok-line: #8cc49a;
+  --err-bg: #fbeae6;
+  --err-line: #e09a88;
+  --info-bg: #eef2f8;
+  --info-line: #a9bbd6;
+  --focus: #1f6feb;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1b1815;
+    --surface: #24201c;
+    --text: #f1ebe4;
+    --muted: #b3a89d;
+    --line: #3b352f;
+    --accent: #f08a4b;
+    --accent-ink: #1b1815;
+    --ok-bg: #1f3325;
+    --ok-line: #3f7a4f;
+    --err-bg: #3a201a;
+    --err-line: #8a4636;
+    --info-bg: #1f2633;
+    --info-line: #3d5175;
+    --focus: #79b8ff;
+    color-scheme: dark;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+html {
+  -webkit-text-size-adjust: 100%;
+}
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 17px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+a {
+  color: var(--accent);
+}
+:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.top {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+.brand {
+  font-weight: 700;
+  text-decoration: none;
+  color: var(--text);
+}
+.page {
+  max-width: 680px;
+  margin: 0 auto;
+  padding: 16px 16px 48px;
+}
+.foot {
+  max-width: 680px;
+  margin: 0 auto;
+  padding: 0 16px 32px;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+h1 {
+  font-size: 28px;
+  line-height: 1.2;
+  margin: 8px 0 12px;
+}
+h2 {
+  font-size: 20px;
+  margin: 28px 0 8px;
+}
+.muted {
+  color: var(--muted);
+}
+.pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.row-between {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.back {
+  display: inline-block;
+  margin: 4px 0 8px;
+  padding: 6px 0;
+  text-decoration: none;
+}
+
+.button {
+  display: inline-block;
+  min-height: 48px;
+  padding: 12px 20px;
+  border: 0;
+  border-radius: 10px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font: inherit;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+}
+.button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.link {
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: var(--accent);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.cards {
+  list-style: none;
+  padding: 0;
+  margin: 12px 0;
+  display: grid;
+  gap: 10px;
+}
+.card {
+  display: block;
+  padding: 16px;
+  min-height: 56px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  color: var(--text);
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.facts {
+  display: grid;
+  gap: 4px 16px;
+  grid-template-columns: 1fr;
+  margin: 0 0 8px;
+  padding: 12px 16px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+.facts div {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.facts dt {
+  color: var(--muted);
+}
+.facts dd {
+  margin: 0;
+  font-weight: 600;
+}
+.list {
+  padding-left: 1.4em;
+}
+.list li {
+  margin: 4px 0;
+}
+.media {
+  padding: 12px;
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+  color: var(--muted);
+}
+
+fieldset {
+  border: 0;
+  padding: 0;
+  margin: 20px 0 0;
+}
+legend {
+  font-size: 20px;
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 14px 0;
+}
+.label {
+  font-weight: 600;
+}
+.opt,
+.hint {
+  color: var(--muted);
+  font-weight: 400;
+  font-size: 15px;
+}
+input,
+textarea {
+  width: 100%;
+  font: inherit;
+  font-size: 17px; /* 16px+ stops iOS zooming in */
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px;
+}
+textarea {
+  resize: vertical;
+}
+.box {
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.notice {
+  margin: 14px 0;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid;
+}
+.notice-ok {
+  background: var(--ok-bg);
+  border-color: var(--ok-line);
+}
+.notice-error {
+  background: var(--err-bg);
+  border-color: var(--err-line);
+}
+.notice-info {
+  background: var(--info-bg);
+  border-color: var(--info-line);
+}
+.mine {
+  margin: 12px 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+}
+.mine summary {
+  font-weight: 600;
+  cursor: pointer;
+}
+.turnstile {
+  margin: 16px 0 0;
+  min-height: 65px;
+}
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 20px;
+}
+
+/* Honeypot: off-screen rather than display:none, which some bots skip. */
+.hp {
+  position: absolute;
+  left: -10000px;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+}
+
+@media (min-width: 560px) {
+  .facts {
+    grid-template-columns: 1fr 1fr;
+  }
+}

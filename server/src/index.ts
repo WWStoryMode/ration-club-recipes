@@ -3,6 +3,7 @@
  * Startup: SECRETS_DIR writable → import DOCSPLUS_LOGIN_BUNDLE (only into an empty store) → one-instance lock →
  * protection (Turnstile, rate limits, audit log in DATA_DIR) → approval queue / chat notes (optional) → serve.
  */
+import { existsSync } from "node:fs";
 import { access, chmod, constants, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { serve } from "@hono/node-server";
@@ -95,8 +96,11 @@ async function main() {
     const recipes = new RecipesService({ docs, lock: new InMemoryLock(), slug: config.docSlug });
     const chat = config.chatSummaries ? new ChatSummaries({ chat: docs, booklet: () => recipes.bookletId() }) : undefined;
     if (chat) console.log("[start] Chat summaries are ON.");
-    const server = serve({ fetch: createApp({ recipes, protection, chat, ...approvalDeps }).fetch, port, hostname: process.env.HOST ?? "127.0.0.1" }, () => {
-      console.log(`API on http://localhost:${port}  (doc: ${config.docSlug})`);
+    const webRoot = path.resolve(config.repoRoot, process.env.WEB_DIST ?? "web/dist");
+    const hasWeb = existsSync(path.join(webRoot, "index.html"));
+    if (!hasWeb) console.warn(`[start] No web page build in ${webRoot}: serving the API only. Run \`pnpm build\` to build it.`);
+    const server = serve({ fetch: createApp({ recipes, protection, chat, ...approvalDeps, webRoot: hasWeb ? webRoot : undefined }).fetch, port, hostname: process.env.HOST ?? "127.0.0.1" }, () => {
+      console.log(`${hasWeb ? "Site and API" : "API"} on http://localhost:${port}  (doc: ${config.docSlug})`);
     });
     server.on("error", (err) => {
       // e.g. EADDRINUSE: never leave the instance lock behind
