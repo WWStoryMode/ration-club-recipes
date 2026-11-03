@@ -3,6 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "dev": "tsx watch --env-file-if-exists=../.env src/index.ts",
+    "start": "tsx --env-file-if-exists=../.env src/index.ts",
     "login": "tsx --env-file-if-exists=../.env src/scripts/login.ts",
     "check": "tsx --env-file-if-exists=../.env src/scripts/check.ts",
     "token-info": "tsx --env-file-if-exists=../.env src/scripts/tokenInfo.ts",
@@ -14,9 +16,11 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@hono/node-server": "^2.1.5",
     "@modelcontextprotocol/sdk": "1.32.1",
     "hono": "^4.11.4",
-    "open": "^10.2.0"
+    "open": "^10.2.0",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
