@@ -98,8 +98,30 @@ Visitors never see Markdown. They fill in plain fields, and the server (`server/
   ingredient per paragraph works, and docs.plus's read-back quirks (measured live: `&amp;`/`&lt;` entities, web
   addresses turned into links, an unescaped leading `#`) are undone. Saving a form unchanged rewrites nothing, and
   the first save of an old recipe tidies its labels into the layout above.
-- Recipes with sub-headings or pictures/videos don't fit the form: the page shows them read-only and says only
-  organisers can edit them.
+- Recipes with sub-headings don't fit the form: the page shows them read-only and says only organisers can edit them.
+
+### Photos (links only)
+
+Visitors can add up to 3 photos per save (6 per recipe), each with an optional caption, by pasting a **link to the
+picture**. We never upload or store images. In the booklet, each photo goes at the end of the recipe as a picture
+block followed by its caption line, and captions stay editable through the form afterwards.
+
+- **docs.plus doesn't copy pictures** (checked 2026-11-03): every reader's browser loads the picture from the link.
+  So the photo is only as good as the link. If the site behind it deletes or changes the picture, the booklet changes too.
+- **The app can never remove a picture** (docs.plus refuses). Removing one means deleting it by hand in docs.plus.
+  Photos follow `REQUIRE_APPROVAL` like text. `pnpm queue show` lists each photo link so you can open it before approving.
+- **Each link is checked once on the server**, and again on approval:
+  - `https` only;
+  - no private, loopback or link-local addresses. This is checked on the address the hostname actually resolves to,
+    and after every redirect (at most 3), so a link can't be used to probe our own network;
+  - the file must start like a JPEG, PNG, GIF or WebP, and be at most 5 MB if its size is given.
+- docs.plus reads pictures back only as `[image]`, so the server keeps its own record of which links it added to which
+  recipe (`DATA_DIR/photo-links.json`) to show them on the page. A picture added by hand in docs.plus shows as
+  "a picture is here".
+- **Privacy:** a photo link works like any picture on the web. The site that hosts it sees the IP address of each
+  person who views it, on our page and in docs.plus. Our page sends no referrer with it.
+- Text under a picture that isn't a single caption line (for example, paragraphs an organiser typed) makes the recipe
+  organiser-only, so the form never mixes it up.
 
 ### How saving works
 
@@ -147,8 +169,9 @@ once there are more than 6), one recipe, edit, and add.
 - Errors are the server's plain-language messages. "Offline" has its own message.
 
 In production the server serves `web/dist` for every non-`/api` path, with hashed assets cached for a year and a
-strict **Content Security Policy**: scripts only from this site and `challenges.cloudflare.com` (Turnstile), no
-framing by other sites (`frame-ancestors 'none'`), and requests only to this site. Set `WEB_DIST` to serve a
+strict **Content Security Policy**: scripts only from this site and `challenges.cloudflare.com` (Turnstile), images
+from this site or any `https` address (recipe photos are links), no framing by other sites (`frame-ancestors 'none'`),
+and requests only to this site. Set `WEB_DIST` to serve a
 build from elsewhere. Without a build, the server serves the API only.
 
 ## Protection
@@ -381,6 +404,7 @@ server/src/recipes.ts   RecipesService: list/read/save/add, with check-only vari
 server/src/app.ts       Hono routes: public API, protection pipeline, admin (approval) routes
 server/src/protect/     client IP, rate limits, Turnstile, audit log
 server/src/queue.ts     approval queue (DATA_DIR/pending)
+server/src/photos.ts    photo links: safe link check, our record of links per recipe
 server/src/chat.ts      optional chat summaries
 server/src/scripts/     login, check, token-info, export-login, audit-log, queue, test-doc tools
 server/src/recipeForm.ts  form fields ↔ booklet Markdown

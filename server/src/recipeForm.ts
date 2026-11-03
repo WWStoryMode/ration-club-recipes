@@ -35,11 +35,20 @@ export interface RecipeForm {
   story: string;
   /** Text already in the recipe that fits no field. Shown read-only and written back unchanged. Never from visitors. */
   other: string;
+  /** Pictures and videos at the end of the recipe, in order, each with the caption line under it. */
+  photos: PhotoValue[];
 }
 
-export const FORM_LIMITS = { name: 200, short: 100, line: 500, lines: 100, story: 5000 };
+export interface PhotoValue {
+  kind: string; // "image", "youtube", …
+  caption: string;
+  /** The link, when we added it (docs.plus reads pictures back only as "[image]"). Display only. */
+  url?: string;
+}
 
-export const emptyForm = (): RecipeForm => ({ headChef: "", helpers: "", date: "", serves: "", cost: "", ingredients: [], method: [], tips: [], story: "", other: "" });
+export const FORM_LIMITS = { name: 200, short: 100, line: 500, lines: 100, story: 5000, caption: 200 };
+
+export const emptyForm = (): RecipeForm => ({ headChef: "", helpers: "", date: "", serves: "", cost: "", ingredients: [], method: [], tips: [], story: "", other: "", photos: [] });
 
 const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
 const DATE = new RegExp(`^(\\d{1,2}) (${MONTHS.join("|")}) (\\d{4})$`);
@@ -123,8 +132,24 @@ function short(value: string, label: string, max = FORM_LIMITS.short): string {
 // Form → Markdown
 // ---------------------------------------------------------------------------
 
+/** A photo caption: one line of plain text, escaped. "" for none. */
+export function formatCaption(raw: string): string {
+  const c = clean(raw);
+  if (c.length > FORM_LIMITS.caption) throw new ApiError("invalid", `Photo captions can be at most ${FORM_LIMITS.caption} characters.`);
+  return escapeText(c);
+}
+
+/** The caption under a picture, from the text blocks after it. Undefined if they don't look like one caption line. */
+export function parseCaption(blocks: Block[]): string | undefined {
+  const text = blocks.filter((b) => !b.isEmpty);
+  if (!text.length) return "";
+  if (text.length > 1) return undefined;
+  const plain = toPlain(text[0]!.markdown).replace(/\s+/g, " ").trim();
+  return plain.length > FORM_LIMITS.caption * 2 || /^\s*([-*+]|\d+[.)])\s/m.test(text[0]!.markdown) ? undefined : plain;
+}
+
 /** The recipe body (no heading) for these form values. Throws ApiError("invalid") with a plain message on bad input. */
-export function formatRecipe(f: RecipeForm): string {
+export function formatRecipe(f: Omit<RecipeForm, "photos">): string {
   const headChef = short(f.headChef, "Head chef", FORM_LIMITS.name);
   const helpers = short(f.helpers, "Helpers", FORM_LIMITS.name);
   const serves = short(f.serves, "Serves");

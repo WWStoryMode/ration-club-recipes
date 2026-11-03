@@ -24,11 +24,14 @@ export interface PendingSection extends Base {
   baseRev: string;
   before: string[];
   texts: string[];
+  /** New photos (links already checked once; checked again on approval). */
+  photos?: Array<{ url: string; caption: string }>;
 }
 export interface PendingRecipe extends Base {
   kind: "add_recipe";
   title: string;
   markdown: string;
+  photos?: Array<{ url: string; caption: string }>;
 }
 export type PendingChange = PendingSection | PendingRecipe;
 export type NewPending = Omit<PendingSection, "id" | "submittedAt"> | Omit<PendingRecipe, "id" | "submittedAt">;

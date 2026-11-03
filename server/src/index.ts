@@ -18,6 +18,7 @@ import { defaultStore } from "./mcp.js";
 import { FileAuditLog, ipHasher, loadSalt } from "./protect/audit.js";
 import { parseRate, RateLimiter } from "./protect/rateLimit.js";
 import { noHumanCheck, Turnstile, type HumanCheck } from "./protect/turnstile.js";
+import { FilePhotoLinks } from "./photos.js";
 import { FilePendingQueue } from "./queue.js";
 import { RecipesService } from "./recipes.js";
 
@@ -93,7 +94,7 @@ async function main() {
   try {
     const port = Number(process.env.PORT ?? 3000);
     const docs = new LazyDocs(config.docSlug, { store });
-    const recipes = new RecipesService({ docs, lock: new InMemoryLock(), slug: config.docSlug });
+    const recipes = new RecipesService({ docs, lock: new InMemoryLock(), slug: config.docSlug, photoLinks: new FilePhotoLinks(path.join(config.dataDir, "photo-links.json")) });
     const chat = config.chatSummaries ? new ChatSummaries({ chat: docs, booklet: () => recipes.bookletId() }) : undefined;
     if (chat) console.log("[start] Chat summaries are ON.");
     const webRoot = path.resolve(config.repoRoot, process.env.WEB_DIST ?? "web/dist");

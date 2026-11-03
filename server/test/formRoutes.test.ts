@@ -118,6 +118,7 @@ describe("serving the web page", () => {
     const csp = home.headers.get("content-security-policy")!;
     expect(csp).toContain("script-src 'self' https://challenges.cloudflare.com");
     expect(csp).toContain("frame-ancestors 'none'");
+    expect(csp).toContain("img-src 'self' data: https:");
 
     const js = await app.request("/assets/app-abc.js");
     expect(js.headers.get("cache-control")).toContain("immutable");

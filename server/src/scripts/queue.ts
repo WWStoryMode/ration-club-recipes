@@ -31,7 +31,9 @@ async function api<T>(method: string, path: string, body?: unknown): Promise<T> 
   return json;
 }
 
-const label = (p: PendingChange) => (p.kind === "save_section" ? `edit  "${p.recipe}"${p.section !== p.recipe ? ` › ${p.section}` : ""}` : `new   "${p.title}"`);
+const label = (p: PendingChange) =>
+  (p.kind === "save_section" ? `edit  "${p.recipe}"${p.section !== p.recipe ? ` › ${p.section}` : ""}` : `new   "${p.title}"`) +
+  (p.photos?.length ? `  +${p.photos.length} photo(s)` : "");
 
 async function resolve(prefix: string | undefined): Promise<string> {
   if (!prefix || prefix.length < 8) throw new Error("Give the change's id (at least its first 8 characters). Run `pnpm queue` to list them.");
@@ -40,6 +42,13 @@ async function resolve(prefix: string | undefined): Promise<string> {
   if (hits.length !== 1) throw new Error(hits.length ? `"${prefix}" matches ${hits.length} changes; give more characters.` : `No waiting change starts with "${prefix}".`);
   return hits[0]!.id;
 }
+
+/** New photos can never be removed by the app afterwards: open each link and look before approving. */
+const photos = (list: Array<{ url: string; caption: string }> | undefined) => {
+  if (!list?.length) return;
+  console.log(`\n--- ${list.length} new photo(s): open each link and look before approving ---`);
+  list.forEach((x, i) => console.log(`${i + 1}. ${x.url}${x.caption ? `\n   caption: ${x.caption}` : ""}`));
+};
 
 const block = (title: string, parts: string[]) => {
   console.log(`\n--- ${title} ---`);
@@ -65,9 +74,11 @@ async function main() {
     if (p.kind === "save_section") {
       block("in the document now", r.current ?? []);
       block("proposed", p.texts);
+      photos(p.photos);
       if (r.changedSince) console.log("\n! The section changed after the visitor loaded it. Approving needs --overwrite, which replaces the newer text.");
     } else {
       block("proposed recipe", [p.markdown || "(empty: the standard Head Chef / Support / Ingredients / Method template)"]);
+      photos(p.photos);
     }
     return;
   }

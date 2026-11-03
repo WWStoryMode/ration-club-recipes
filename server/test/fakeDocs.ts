@@ -82,13 +82,13 @@ export class FakeDocs implements DocsPort {
       throw new DocsPlusError("invalid_input", "edit_blocks", `remove_blocks: block(s) ${p.afterBlock + 1} hold a picture, video or file, and docs.plus never deletes media for an AI app.`);
     }
     if (/^#{1,6}\s/m.test(p.markdown)) throw new DocsPlusError("invalid_input", "edit_blocks", "markdown: fake does not support headings");
-    s.blocks.splice(p.afterBlock, p.removeBlocks, ...(p.markdown ? p.markdown.split(/\n{2,}/) : []));
+    s.blocks.splice(p.afterBlock, p.removeBlocks, ...toBlocks(p.markdown));
   }
 
   async appendRecipe(title: string, body: string, level = 3) {
     this.calls.push(`append:${title}`);
     if (this.failAppend) throw this.failAppend;
-    this.sections.push({ id: this.newId(), heading: `${"#".repeat(level)} ${title}`, blocks: body ? body.split(/\n{2,}/) : [] });
+    this.sections.push({ id: this.newId(), heading: `${"#".repeat(level)} ${title}`, blocks: toBlocks(body) });
     return "Appended.";
   }
 
@@ -98,6 +98,9 @@ export class FakeDocs implements DocsPort {
     return s;
   }
 }
+
+/** Paragraphs → blocks. Like docs.plus, a picture (`![alt](url)`) becomes a media block that reads back as "\[image\]". */
+const toBlocks = (md: string) => (md ? md.split(/\n{2,}/).map((b) => (/^!\[[^\]]*\]\([^)]*\)$/.test(b.trim()) ? "\\[image\\]" : b)) : []);
 
 /** A small booklet shaped like the real one, with one recipe holding subsections and media. */
 export function booklet() {
