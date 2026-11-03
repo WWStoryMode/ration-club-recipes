@@ -72,7 +72,10 @@ describe("saving a section", () => {
   it("replaces all text in a section without media", async () => {
     const { svc, docs } = setup();
     const id = docs.byTitle("Pasta Bake").id;
-    const v = await svc.saveSection(id, rev(docs, "Pasta Bake"), ["**Head Chef: Chef Alpha**\r\n\r\n\r\n- pasta\n- cheese  "]);
+    const { section: v, before, changed, recipe } = await svc.saveSection(id, rev(docs, "Pasta Bake"), ["**Head Chef: Chef Alpha**\r\n\r\n\r\n- pasta\n- cheese  "]);
+    expect(changed).toBe(true);
+    expect(recipe).toEqual({ id, title: "Pasta Bake" });
+    expect(before.parts[0]).toMatchObject({ markdown: expect.stringContaining("Helper One") });
     expect(docs.byTitle("Pasta Bake").blocks).toEqual(["**Head Chef: Chef Alpha**", "- pasta\n- cheese"]);
     expect(v.rev).toBe(rev(docs, "Pasta Bake"));
     expect(docs.calls.filter((c) => c.startsWith("edit"))).toEqual([`edit:${id}:0:5`]);
@@ -96,8 +99,9 @@ describe("saving a section", () => {
 
   it("writes nothing when nothing changed", async () => {
     const { svc, docs } = setup();
-    await svc.saveSection(docs.byTitle("Pasta Bake").id, rev(docs, "Pasta Bake"), ["**Head Chef: Chef Alpha**\n\n**Support: Helper One, Helper Two**\n\n30 September 2026"]);
+    const r = await svc.saveSection(docs.byTitle("Pasta Bake").id, rev(docs, "Pasta Bake"), ["**Head Chef: Chef Alpha**\n\n**Support: Helper One, Helper Two**\n\n30 September 2026"]);
     expect(docs.calls.some((c) => c.startsWith("edit"))).toBe(false);
+    expect(r.changed).toBe(false);
   });
 
   it("refuses with the latest version if the section changed since the visitor loaded it", async () => {

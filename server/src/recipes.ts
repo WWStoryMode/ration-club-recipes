@@ -39,6 +39,14 @@ export interface SectionView {
   parts: Part[];
 }
 
+/** What a save did: the section before and after, and whether anything was written. For the audit log. */
+export interface SaveResult {
+  section: SectionView;
+  before: SectionView;
+  changed: boolean;
+  recipe: { id: string; title: string };
+}
+
 export interface RecipeView extends RecipeSummary {
   fields: RecipeFields;
   sections: SectionView[]; // the recipe's own section first, then its subsections in order
@@ -163,18 +171,19 @@ export class RecipesService {
    * since then, nothing is written and the latest version comes back with a 409.
    * Media blocks are never touched. Changed text parts are written bottom-up, so earlier block numbers stay valid.
    */
-  async saveSection(sectionId: string, baseRev: string, texts: string[]): Promise<SectionView> {
+  async saveSection(sectionId: string, baseRev: string, texts: string[]): Promise<SaveResult> {
     if (texts.length > LIMITS.texts) throw new ApiError("invalid", "Too many parts in one save.");
     const clean = texts.map((t, i) => checkVisitorMarkdown(t, texts.length > 1 ? `Part ${i + 1}` : "Text"));
-    this.recipeOf(await this.outline(), sectionId); // must be a recipe or one of its subsections
+    const recipeNode = this.recipeOf(await this.outline(), sectionId); // must be a recipe or one of its subsections
+    const recipe = { id: recipeNode.sectionId!, title: recipeNode.title };
 
     return this.o.lock.withLock(this.o.slug, async () => {
       try {
         try {
-          return await this.writeSection(sectionId, baseRev, clean);
+          return { ...(await this.writeSection(sectionId, baseRev, clean)), recipe };
         } catch (err) {
           // Someone wrote between our read and our edit. Retry once; writeSection re-reads and re-checks baseRev.
-          if (err instanceof DocsPlusError && err.kind === "stale_rev") return await this.writeSection(sectionId, baseRev, clean);
+          if (err instanceof DocsPlusError && err.kind === "stale_rev") return { ...(await this.writeSection(sectionId, baseRev, clean)), recipe };
           throw err;
         }
       } finally {
@@ -183,9 +192,10 @@ export class RecipesService {
     });
   }
 
-  private async writeSection(sectionId: string, baseRev: string, texts: string[]): Promise<SectionView> {
+  private async writeSection(sectionId: string, baseRev: string, texts: string[]): Promise<Omit<SaveResult, "recipe">> {
     let s = await this.o.docs.readSection(sectionId);
     if (s.rev !== baseRev) throw new ApiError("conflict", MESSAGES.conflict, { latest: sectionView(s) });
+    const before = sectionView(s);
 
     const textSegs = toSegments(s.blocks).filter((g) => g.kind === "text");
     if (texts.length !== textSegs.length) {
@@ -198,7 +208,7 @@ export class RecipesService {
       await this.o.docs.editBlocks({ sectionId, rev: s.rev, afterBlock: seg.start, removeBlocks: seg.count, markdown: texts[changed[k]!]! });
       s = await this.o.docs.readSection(sectionId); // edit_blocks returns no rev
     }
-    return sectionView(s);
+    return { section: sectionView(s), before, changed: changed.length > 0 };
   }
 
   /**

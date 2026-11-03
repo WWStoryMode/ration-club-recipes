@@ -1,5 +1,7 @@
 # Secrets: OAuth client registration, tokens, PKCE verifier. NEVER commit.
 .secrets*/
+# Audit log (visitor text, IP hashes) and its salt
+.data/
 .env*
 !.env.example
 
