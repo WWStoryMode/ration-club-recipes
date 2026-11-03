@@ -12,8 +12,9 @@ docs.plus MCP only lets a signed-in person edit documents they **own**. So the b
 login for the owner and acts as them. The browser never talks to docs.plus: MCP requests carrying a
 browser `Origin` header are refused with 403.
 
-> **Status: Phase 2.** Backend API (`server/`) on top of the Phase 1 auth and docs.plus wrapper.
-> Not built yet: Redis lock and token store (serverless), full input clean-up, abuse protection, front end, `/health`.
+> **Status: Phase 3.** Backend API (`server/`), made safe to run as **one always-on server**: token refresh
+> guard, one-instance lock, and a login bundle for the host. Not built yet: full input clean-up, abuse protection,
+> front end, deploy config, `/health`.
 
 ## Setup
 
@@ -23,7 +24,7 @@ Needs Node ≥ 20 (`.nvmrc` pins 24) and pnpm via corepack.
 nvm use               # or nvm install
 corepack enable       # provides pnpm 11 (pinned in package.json)
 pnpm install
-cp .env.example .env  # optional: the defaults point at the real doc
+cp .env.example .env  # optional: the defaults point at the fictional test doc
 brew install gitleaks # required by the pre-commit hook
 pnpm test
 ```
@@ -36,7 +37,8 @@ pnpm test
 | `pnpm dev:server` | API on http://localhost:3000, reloads on change. Uses `DOC_SLUG`, which defaults to the test doc. |
 | `pnpm run login` | One-time OAuth sign-in to docs.plus. Opens your browser. Safe to rerun. `-- --force` signs in again from scratch. |
 | `pnpm check` | Read-only: lists the MCP tools and your documents, prints `OWNER: yes/no` for `DOC_SLUG`, and prints its outline. |
-| `pnpm token-info` | Shows token facts (has refresh token, expiry). Never prints tokens. `-- --refresh` tests a refresh and whether it rotates. |
+| `pnpm token-info` | Shows token facts (has refresh token, expiry). Never prints tokens. `-- --refresh` tests a refresh and whether it rotates. `-- --expire-now` (testing) marks the access token expired, so a running server refreshes on its next call. |
+| `pnpm export-login` | Prints the login in `SECRETS_DIR` as one secret bundle for the host's `DOCSPLUS_LOGIN_BUNDLE`. See [Hosting](#hosting-one-server). |
 | `pnpm create-test-doc` | Creates the fictional TEST doc from `server/src/seed/testRecipes.ts`, owned by the signed-in account, and sets `DOC_SLUG` in `.env`. Reuses an existing test doc. `-- --new` forces another. |
 | `pnpm capture-fixtures` | Read-only. Regenerates `server/test/fixtures.ts` from `DOC_SLUG`, and refuses unless that doc is yours. |
 | `pnpm write-test` | Runs every write path against the **test doc only** and prints docs.plus's real replies. It refuses any other doc. Edits "Mystery Stew" and restores it. Appends "Write Test Recipe" once, since headings can't be removed. |
@@ -115,7 +117,8 @@ until the token is revoked.
 
 - **Revoke it:** docs.plus → **Settings › Connected apps** → *Ration Club Recipes* → **Disconnect**.
   Then delete `.secrets/`. Do this if a token may have leaked, or when retiring the app.
-- Secrets never go into git. `.secrets/` and `.env*` are gitignored, and only `.env.example`, with placeholders, is committed.
+- Secrets never go into git. `.secrets*/` (including `.secrets-server/`) and `.env*` are gitignored, and only `.env.example`, with placeholders, is committed.
+- The `pnpm export-login` bundle is as secret as the tokens. It belongs only in the host's env, and only until the first start.
 - A **gitleaks** pre-commit hook (`.husky/pre-commit`, rules in `.gitleaks.toml`) blocks commits containing tokens. It refuses to commit if gitleaks is not installed.
 - `.github/CODEOWNERS` marks the hook, package and secret-scanning files as needing the owner's review. Review any change to `.husky/` or `prepare` scripts carefully: they run on your machine.
 - **Enable GitHub secret scanning push protection** on the repo: Settings › Code security › Secret Protection › Push protection.
@@ -133,18 +136,52 @@ Measured on 2026-11-02 with `pnpm token-info -- --refresh`:
 | Access token lifetime | **3600 s (1 hour)**, a JWT |
 | Refresh rotates the refresh token? | **Yes.** Each refresh returns a new one. |
 
-What this means:
+Each refresh **uses up** the stored refresh token. If two refreshes use the same token, the second reuses a
+spent token, and docs.plus (Supabase) may revoke the whole login. Then someone has to sign in again.
 
-- Each refresh **uses up** the stored refresh token. The new one must be saved before anything else
-  happens. If two processes refresh with the same token at once, Supabase may treat it as reuse and revoke the
-  whole session, and then someone has to run `pnpm run login` again.
-- **Serverless (Vercel + Upstash):** tokens must live in Redis (`RedisTokenStore`, not a file). Take a
-  Redis lock around refresh, re-read the tokens after getting the lock (another function may already have
-  refreshed), and write the rotated token before releasing the lock.
-- **One always-on server:** `FileTokenStore` on a persistent volume works, but refreshes still need an
-  in-process mutex. Without a volume, a redeploy loses the rotated token. Redis is the safer choice either way.
-- If the app is idle longer than the refresh token lives, a login is needed again. The `/health` check
-  (later phase) should exercise the token regularly and alert when it fails.
+**Chosen hosting: one always-on server** (decided 2026-11-03), so no Redis. How the server stays safe:
+
+- **Refresh before expiry, once.** `TokenRefresher` (`server/src/auth/refresh.ts`) refreshes when under
+  5 minutes are left. Concurrent requests share that one refresh. The SDK on its own only refreshes after
+  docs.plus rejects a call, and concurrent rejections would each refresh with the same token.
+- **Identical refresh requests are merged.** All refresh requests go through `dedupeRefreshFetch`. Simultaneous ones
+  become one network call, and for 60 s a caller still holding the old token gets the same new tokens instead
+  of spending it again.
+- **A rejected call is retried once.** docs.plus didn't run it, so this is safe even for writes. Two rejections in a row
+  mean the login is gone (`503`).
+- **One server per login.** `server.lock` in `SECRETS_DIR` has a 30 s heartbeat. A second server refuses to start.
+  A lock from a crashed server is taken over after 90 s. Scripts (`check`, `write-test`, …) warn if a server is running on the same login.
+- Measured live: 10 simultaneous requests with an expiring token, then 10 with a rejected token → all 200,
+  **one** refresh each time.
+
+Serverless would need the tokens and the lock in shared storage such as Redis. `TokenStore` and `Lock` are interfaces,
+so that can be added later without rewriting the app.
+
+## Hosting (one server)
+
+Railway, Fly or Render all work. The requirements:
+
+- **Exactly one instance.** Turn off autoscaling and replicas. Separate machines can't see each other's lock.
+- **A persistent disk** mounted at `SECRETS_DIR` (e.g. `SECRETS_DIR=/data/secrets`). Without it, every
+  redeploy loses the rotated token and you'd have to sign in again.
+- `HOST=0.0.0.0`, and `PORT` as the platform requires. `DOC_SLUG` = the booklet to edit.
+
+**Getting the login onto the server.** Use a **separate** docs.plus session for the server, so your laptop and
+the server never share a rotating token:
+
+```sh
+SECRETS_DIR=.secrets-server pnpm run login       # sign in as the doc owner, click Allow
+SECRETS_DIR=.secrets-server pnpm export-login | pbcopy
+```
+
+1. Paste it into the host's environment as `DOCSPLUS_LOGIN_BUNDLE` and deploy. The log says
+   "Imported the docs.plus login".
+2. **Delete `DOCSPLUS_LOGIN_BUNDLE`** from the host, and run `rm -rf .secrets-server`. The bundle is only imported into
+   an empty `SECRETS_DIR`, and goes stale after the first refresh.
+
+**If the login dies** (`503`s, "login needed" in the log): delete the tokens on the disk
+(`$SECRETS_DIR/tokens.json`), then repeat the steps above. To cut the server off completely, use docs.plus
+**Settings › Connected apps › Disconnect**.
 
 ## docs.plus write behaviour (measured)
 
