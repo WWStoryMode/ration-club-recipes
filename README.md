@@ -12,9 +12,10 @@ docs.plus MCP only lets a signed-in person edit documents they **own**. So the b
 login for the owner and acts as them. The browser never talks to docs.plus: MCP requests carrying a
 browser `Origin` header are refused with 403.
 
-> **Status: Phase 4b.** Backend API (`server/`) for **one always-on server**, with abuse protection: input
+> **Status: Phase 5.** A mobile-first web page (`web/`) where visitors browse recipes and edit them through a
+> simple form, served by the backend (`server/`) on **one always-on server**, with abuse protection: input
 > cleaning, rate limits, Cloudflare Turnstile, a honeypot, an audit log, an optional approval queue and optional
-> chat summaries. Not built yet: front end, deploy config, `/health`.
+> chat summaries. Not built yet: deploy config, `/health`.
 
 ## Setup
 
@@ -35,6 +36,9 @@ pnpm test
 | Command | What it does |
 |---|---|
 | `pnpm dev:server` | API on http://localhost:3000, reloads on change. Uses `DOC_SLUG`, which defaults to the test doc. |
+| `pnpm dev:web` | The web page on http://localhost:5173, reloads on change. Sends `/api` to `dev:server`, so run both. |
+| `pnpm build` then `pnpm start` | Production-style: builds `web/dist`, and the server serves the page and the API together on http://localhost:3000. |
+| `pnpm queue` | Approval queue: list, show, approve, reject. See [Approval queue](#approval-queue-optional). |
 | `pnpm run login` | One-time OAuth sign-in to docs.plus. Opens your browser. Safe to rerun. `-- --force` signs in again from scratch. |
 | `pnpm check` | Read-only: lists the MCP tools and your documents, prints `OWNER: yes/no` for `DOC_SLUG`, and prints its outline. |
 | `pnpm token-info` | Shows token facts (has refresh token, expiry). Never prints tokens. `-- --refresh` tests a refresh and whether it rotates. `-- --expire-now` (testing) marks the access token expired, so a running server refreshes on its next call. |
@@ -63,15 +67,43 @@ All JSON. Errors are `{ "error": { "code", "message", … } }`, and `message` is
 | Route | What it does |
 |---|---|
 | `GET /api/recipes` | Recipes (the direct children of the booklet's `#` heading), with their subsections. |
-| `GET /api/recipes/:id` | One recipe: `fields` (head chef, support, date) and `sections` (the recipe, then its subsections). Each section has a `rev` and `parts`: text parts are editable, media parts (`{type:"media", kind:"image"}`) are fixed. |
+| `GET /api/recipes/:id` | One recipe: `form` (its values as form fields, its `rev`, and `editable`), `fields` (head chef, support, date) and `sections` (the recipe, then its subsections). Each section has a `rev` and `parts`: text parts are editable, media parts (`{type:"media", kind:"image"}`) are fixed. |
+| `PUT /api/recipes/:id` | **What the web page uses.** Body `{ baseRev, form }`: plain-text form values. The server formats them in the booklet's layout (see [Recipe form](#recipe-form)). Returns the updated section. |
 | `PUT /api/sections/:id` | Body `{ baseRev, texts }`. Send one string per text part, in order, plus the `rev` you loaded. Returns the updated section with its new `rev`. |
-| `POST /api/recipes` | Body `{ title, markdown? }`. Appends `### **Title**` + body at the end of the booklet. An empty body gets the Head Chef / Support / Ingredients / Method template. Returns 201. |
+| `POST /api/recipes` | Body `{ title, form }` (the web page) or `{ title, markdown? }`. Appends `### **Title**` + body at the end of the booklet. An empty body gets the Head Chef / Support / Ingredients / Method template. Returns 201. |
 | `GET /api/config` | What the page needs: Turnstile site key, honeypot field name, `requiresApproval`, limits. |
 
 With the [approval queue](#approval-queue-optional) on, both writes are checked the same way but answer **202**
 `{ pending: { id }, message }` instead of writing, and the message tells the visitor their change is waiting.
 
-**How saving works:** the server takes a per-document lock, then re-reads the section. If its rev isn't
+### Recipe form
+
+Visitors never see Markdown. They fill in plain fields, and the server (`server/src/recipeForm.ts`) converts both ways:
+
+| Field | In the booklet |
+|---|---|
+| Head chef, Helpers | `**Head Chef: …**`, `**Support: …**` (`???` when empty, as in the booklet) |
+| Serves, Approximate cost (optional) | `**Serves: …**`, `**Cost: …**`, left out when empty |
+| Ingredients (one per line) | `**Ingredients**` and a bullet list |
+| Method (one step per line) | `**Method**` and a numbered list |
+| Tips & substitutions (optional) | `**Tips & substitutions**` and a bullet list |
+| Story behind the dish (optional) | `**Story**` and paragraphs |
+| Date cooked (date picker) | `30 September 2026` on the last line |
+
+- **Everything visitors type is literal.** Markdown characters are escaped, so nobody can add headings, bold, links,
+  HTML or lists through a field. They still pass the input checks below as well.
+- **Nothing in the document is lost.** Text that fits no field is shown read-only ("Other notes") and written back
+  unchanged. It is always taken from the document, **never from the browser**, so it can't be used to slip in Markdown.
+- Reading is forgiving: labels count with or without bold, the booklet's "Ingridients" typo is understood, one
+  ingredient per paragraph works, and docs.plus's read-back quirks (measured live: `&amp;`/`&lt;` entities, web
+  addresses turned into links, an unescaped leading `#`) are undone. Saving a form unchanged rewrites nothing, and
+  the first save of an old recipe tidies its labels into the layout above.
+- Recipes with sub-headings or pictures/videos don't fit the form: the page shows them read-only and says only
+  organisers can edit them.
+
+### How saving works
+
+The server takes a per-document lock, then re-reads the section. If its rev isn't
 `baseRev`, someone else changed it, so it answers **409** with the latest version and writes nothing. Otherwise it
 writes only the text parts that changed, last part first so block numbers stay valid, and re-reads after each
 edit, since `edit_blocks` returns no rev. A stale rev from docs.plus gets one retry, which repeats the `baseRev`
@@ -99,6 +131,25 @@ The real cause is logged on the server only.
 
 Reads are cached for 10 seconds, and every write clears the cache. docs.plus allows 60 tool calls a minute for the
 whole app, because every visitor acts as the one owner account.
+
+## The web page
+
+Mobile-first React (`web/`), plain CSS with a dark mode, no router or UI libraries. Pages: all recipes (with search
+once there are more than 6), one recipe, edit, and add.
+
+- **Two people editing at once:** the save answers 409, the page loads the other person's version into the form,
+  and keeps the visitor's own text below it to copy from.
+- **Unsaved changes** are kept in this browser (`localStorage`, if available) and offered back next time, as long as
+  the recipe hasn't changed since.
+- With the approval queue on, the button reads "Send for checking", and the page says the change is waiting for an organiser.
+- **Turnstile** loads only when the server sends a site key. The token is used once and renewed after every attempt.
+- The **honeypot** field sits off-screen, hidden from screen readers and skipped by Tab.
+- Errors are the server's plain-language messages. "Offline" has its own message.
+
+In production the server serves `web/dist` for every non-`/api` path, with hashed assets cached for a year and a
+strict **Content Security Policy**: scripts only from this site and `challenges.cloudflare.com` (Turnstile), no
+framing by other sites (`frame-ancestors 'none'`), and requests only to this site. Set `WEB_DIST` to serve a
+build from elsewhere. Without a build, the server serves the API only.
 
 ## Protection
 
@@ -332,7 +383,10 @@ server/src/protect/     client IP, rate limits, Turnstile, audit log
 server/src/queue.ts     approval queue (DATA_DIR/pending)
 server/src/chat.ts      optional chat summaries
 server/src/scripts/     login, check, token-info, export-login, audit-log, queue, test-doc tools
-web/               Vite + React (placeholder)
+server/src/recipeForm.ts  form fields ↔ booklet Markdown
+web/src/main.tsx   pages: list, recipe, edit/add form
+web/src/api.ts     typed client for /api (the browser never talks to docs.plus)
+web/src/turnstile.tsx  Cloudflare Turnstile widget
 ```
 
 ## License

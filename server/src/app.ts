@@ -1,4 +1,5 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import { serveStatic } from "@hono/node-server/serve-static";
 import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { secureHeaders } from "hono/secure-headers";
@@ -10,6 +11,7 @@ import { noAudit, truncate, type AuditEntry, type AuditLog } from "./protect/aud
 import { clientIp } from "./protect/clientIp.js";
 import { RateLimiter } from "./protect/rateLimit.js";
 import { noHumanCheck, type HumanCheck } from "./protect/turnstile.js";
+import { FORM_LIMITS } from "./recipeForm.js";
 import { isPendingId, type PendingChange, type PendingQueue } from "./queue.js";
 import type { RecipesService, SectionView } from "./recipes.js";
 import { LIMITS } from "./validate.js";
@@ -26,8 +28,30 @@ const SaveSection = z.object({
   texts: z.array(z.string().max(LIMITS.sectionChars * 2)).min(1).max(LIMITS.texts),
   ...protectedFields,
 });
+const line = z.string().max(FORM_LIMITS.line * 2);
+const lines = z.array(line).max(FORM_LIMITS.lines * 2).default([]);
+const field = (max: number) => z.string().max(max * 2).default("");
+/** A visitor's recipe form. No `other`: text that fits no field always comes from the document. */
+const Form = z.object({
+  headChef: field(FORM_LIMITS.name),
+  helpers: field(FORM_LIMITS.name),
+  date: z.string().max(10).default(""),
+  serves: field(FORM_LIMITS.short),
+  cost: field(FORM_LIMITS.short),
+  ingredients: lines,
+  method: lines,
+  tips: lines,
+  story: field(FORM_LIMITS.story),
+});
+const SaveForm = z.object({
+  baseRev: z.string().regex(/^[0-9a-f]{12}$/, "baseRev must be the 12-character rev you loaded"),
+  form: Form,
+  ...protectedFields,
+});
 const AddRecipe = z.object({
   title: z.string().max(LIMITS.titleChars * 2),
+  /** Either form values (the web page) or Markdown (API clients). */
+  form: Form.optional(),
   markdown: z.string().max(LIMITS.sectionChars * 2).default(""),
   ...protectedFields,
 });
@@ -101,14 +125,33 @@ export interface AppDeps {
   adminToken?: string;
   /** Optional one-line notes in the docs.plus chat after a change is written. */
   chat?: ChatNotifier;
+  /** The built web page (web/dist). Served for every non-API GET. Unset = API only (local dev uses Vite). */
+  webRoot?: string;
 }
+
+/**
+ * Only our own files, plus Cloudflare Turnstile's script and frame. Styles allow 'unsafe-inline' because the
+ * Turnstile script styles its own frame. No other origin can run code, be framed, or receive form posts.
+ */
+const CSP = {
+  defaultSrc: ["'self'"],
+  scriptSrc: ["'self'", "https://challenges.cloudflare.com"],
+  frameSrc: ["https://challenges.cloudflare.com"],
+  styleSrc: ["'self'", "'unsafe-inline'"],
+  imgSrc: ["'self'", "data:"],
+  connectSrc: ["'self'"],
+  objectSrc: ["'none'"],
+  baseUri: ["'self'"],
+  formAction: ["'self'"],
+  frameAncestors: ["'none'"],
+};
 
 export function createApp(deps: AppDeps) {
   const p = deps.protection ?? openProtection;
   const chat = deps.chat ?? noChat;
   const app = new Hono();
 
-  app.use("*", secureHeaders());
+  app.use("*", secureHeaders({ contentSecurityPolicy: CSP }));
   app.use("/api/*", bodyLimit({ maxSize: 128 * 1024, onError: () => { throw new ApiError("invalid", "That's too much text to send at once."); } }));
 
   app.onError((err, c) => {
@@ -164,7 +207,7 @@ export function createApp(deps: AppDeps) {
       turnstileSiteKey: p.humanCheck.siteKey,
       honeypotField: HONEYPOT_FIELD,
       requiresApproval: !!deps.queue,
-      limits: { sectionChars: LIMITS.sectionChars, titleChars: LIMITS.titleChars, links: LIMITS.links },
+      limits: { sectionChars: LIMITS.sectionChars, titleChars: LIMITS.titleChars, links: LIMITS.links, form: FORM_LIMITS },
     }),
   );
 
@@ -172,68 +215,99 @@ export function createApp(deps: AppDeps) {
 
   app.get("/api/recipes/:id", async (c) => c.json({ recipe: await deps.recipes.getRecipe(sectionId(c.req.param("id"))) }));
 
-  app.put("/api/sections/:id", (c) =>
-    guardedWrite(c, "save_section", SaveSection, async (b, entry) => {
-      const id = sectionId(c.req.param("id"));
-      Object.assign(entry, { baseRev: b.baseRev, attempted: truncate(b.texts) });
+  /** Save (or, with the approval queue, queue) new text parts for a section. Shared by the section and form routes. */
+  async function saveTexts(c: Context, entry: AuditEntry, id: string, baseRev: string, parts: string[]): Promise<Response> {
+    Object.assign(entry, { sectionId: id, baseRev, attempted: truncate(parts) });
 
-      if (deps.queue) {
-        const chk = await deps.recipes.checkSection(id, b.baseRev, b.texts);
-        Object.assign(entry, { recipeId: chk.recipe.id, recipe: chk.recipe.title, before: texts(chk.before) });
-        if (!chk.changed) {
-          Object.assign(entry, { outcome: "unchanged", attempted: undefined });
-          return c.json({ section: chk.before });
-        }
-        const item = await deps.queue.add({
-          kind: "save_section",
-          requestId: entry.requestId,
-          ipHash: entry.ipHash,
-          sectionId: id,
-          section: chk.before.title,
-          recipeId: chk.recipe.id,
-          recipe: chk.recipe.title,
-          baseRev: b.baseRev,
-          before: texts(chk.before),
-          texts: chk.texts,
-        });
-        Object.assign(entry, { outcome: "queued", pendingId: item.id, attempted: chk.texts });
-        return c.json({ pending: { id: item.id }, message: QUEUED_MESSAGE }, 202);
+    if (deps.queue) {
+      const chk = await deps.recipes.checkSection(id, baseRev, parts);
+      Object.assign(entry, { recipeId: chk.recipe.id, recipe: chk.recipe.title, before: texts(chk.before) });
+      if (!chk.changed) {
+        Object.assign(entry, { outcome: "unchanged", attempted: undefined });
+        return c.json({ section: chk.before });
       }
-
-      const r = await deps.recipes.saveSection(id, b.baseRev, b.texts);
-      Object.assign(entry, {
-        outcome: r.changed ? "saved" : "unchanged",
-        recipeId: r.recipe.id,
-        recipe: r.recipe.title,
-        newRev: r.section.rev,
-        before: texts(r.before),
-        after: texts(r.section),
-        attempted: undefined,
+      const item = await deps.queue.add({
+        kind: "save_section",
+        requestId: entry.requestId,
+        ipHash: entry.ipHash,
+        sectionId: id,
+        section: chk.before.title,
+        recipeId: chk.recipe.id,
+        recipe: chk.recipe.title,
+        baseRev,
+        before: texts(chk.before),
+        texts: chk.texts,
       });
-      if (r.changed) chat.notify(r.recipe.id, chatText.updated(r.recipe.title, r.section.title, false));
-      return c.json({ section: r.section });
+      Object.assign(entry, { outcome: "queued", pendingId: item.id, attempted: chk.texts });
+      return c.json({ pending: { id: item.id }, message: QUEUED_MESSAGE }, 202);
+    }
+
+    const r = await deps.recipes.saveSection(id, baseRev, parts);
+    Object.assign(entry, {
+      outcome: r.changed ? "saved" : "unchanged",
+      recipeId: r.recipe.id,
+      recipe: r.recipe.title,
+      newRev: r.section.rev,
+      before: texts(r.before),
+      after: texts(r.section),
+      attempted: undefined,
+    });
+    if (r.changed) chat.notify(r.recipe.id, chatText.updated(r.recipe.title, r.section.title, false));
+    return c.json({ section: r.section });
+  }
+
+  app.put("/api/sections/:id", (c) =>
+    guardedWrite(c, "save_section", SaveSection, (b, entry) => saveTexts(c, entry, sectionId(c.req.param("id")), b.baseRev, b.texts), {
+      sectionId: c.req.param("id").slice(0, 64),
+    }),
+  );
+
+  /** The web page's edit form: form values in, the booklet's layout out. */
+  app.put("/api/recipes/:id", (c) =>
+    guardedWrite(c, "save_section", SaveForm, async (b, entry) => {
+      const id = sectionId(c.req.param("id"));
+      const parts = await deps.recipes.formTexts(id, b.baseRev, b.form);
+      return saveTexts(c, entry, id, b.baseRev, parts);
     }, { sectionId: c.req.param("id").slice(0, 64) }),
   );
 
   app.post("/api/recipes", (c) =>
     guardedWrite(c, "add_recipe", AddRecipe, async (b, entry) => {
-      Object.assign(entry, { recipe: b.title.slice(0, 200), attempted: truncate([b.markdown]) });
+      const markdown = b.form ? deps.recipes.formBody(b.form) : b.markdown;
+      Object.assign(entry, { recipe: b.title.slice(0, 200), attempted: truncate([markdown]) });
 
       if (deps.queue) {
-        const chk = await deps.recipes.checkNewRecipe(b.title, b.markdown);
+        const chk = await deps.recipes.checkNewRecipe(b.title, markdown);
         const item = await deps.queue.add({ kind: "add_recipe", requestId: entry.requestId, ipHash: entry.ipHash, title: chk.title, markdown: chk.markdown });
         Object.assign(entry, { outcome: "queued", recipe: chk.title, pendingId: item.id, attempted: [chk.markdown] });
         return c.json({ pending: { id: item.id }, message: QUEUED_MESSAGE }, 202);
       }
 
-      const r = await deps.recipes.addRecipe(b.title, b.markdown);
-      Object.assign(entry, { outcome: "added", recipeId: r.id, sectionId: r.id, recipe: r.title, after: [b.markdown], attempted: undefined });
+      const r = await deps.recipes.addRecipe(b.title, markdown);
+      Object.assign(entry, { outcome: "added", recipeId: r.id, sectionId: r.id, recipe: r.title, after: [markdown], attempted: undefined });
       chat.notify(undefined, chatText.added(r.title, false));
       return c.json({ recipe: r }, 201);
     }),
   );
 
   if (deps.queue && deps.adminToken) mountAdmin(app, deps as Required<Pick<AppDeps, "queue" | "adminToken">> & AppDeps, p, chat);
+
+  if (deps.webRoot) {
+    const root = deps.webRoot;
+    // Hashed build files never change: cache them for a year. index.html is re-checked every time.
+    app.use("/assets/*", async (c, next) => {
+      await next();
+      if (c.res.ok) c.header("Cache-Control", "public, max-age=31536000, immutable");
+    });
+    const files = serveStatic({ root });
+    const page = serveStatic({ root, path: "index.html" });
+    app.get("*", async (c, next) => (c.req.path.startsWith("/api/") ? next() : files(c, next)));
+    app.get("*", async (c, next) => {
+      if (c.req.path.startsWith("/api/") || c.req.path.startsWith("/assets/")) return next();
+      c.header("Cache-Control", "no-cache");
+      return page(c, next);
+    });
+  }
 
     return app;
 }
