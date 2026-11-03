@@ -12,10 +12,11 @@ docs.plus MCP only lets a signed-in person edit documents they **own**. So the b
 login for the owner and acts as them. The browser never talks to docs.plus: MCP requests carrying a
 browser `Origin` header are refused with 403.
 
-> **Status: Phase 5.** A mobile-first web page (`web/`) where visitors browse recipes and edit them through a
+> **Status: Phase 6 (all planned phases built).** A mobile-first web page (`web/`) where visitors browse recipes and edit them through a
 > simple form, served by the backend (`server/`) on **one always-on server**, with abuse protection: input
-> cleaning, rate limits, Cloudflare Turnstile, a honeypot, an audit log, an optional approval queue and optional
-> chat summaries. Not built yet: deploy config, `/health`.
+> cleaning, rate limits, Cloudflare Turnstile, a honeypot, an audit log, an optional approval queue,
+> optional chat summaries, optional photos by link, a Dockerfile and health checks. Not built yet: alerts (use an uptime
+> monitor on `/health/docs`).
 
 ## Setup
 
@@ -37,7 +38,7 @@ pnpm test
 |---|---|
 | `pnpm dev:server` | API on http://localhost:3000, reloads on change. Uses `DOC_SLUG`, which defaults to the test doc. |
 | `pnpm dev:web` | The web page on http://localhost:5173, reloads on change. Sends `/api` to `dev:server`, so run both. |
-| `pnpm build` then `pnpm start` | Production-style: builds `web/dist`, and the server serves the page and the API together on http://localhost:3000. |
+| `pnpm build` then `pnpm start` | Production-style: builds `web/dist` (and compiles the server to `server/dist`), and the server serves the page and the API together on http://localhost:3000. |
 | `pnpm queue` | Approval queue: list, show, approve, reject. See [Approval queue](#approval-queue-optional). |
 | `pnpm run login` | One-time OAuth sign-in to docs.plus. Opens your browser. Safe to rerun. `-- --force` signs in again from scratch. |
 | `pnpm check` | Read-only: lists the MCP tools and your documents, prints `OWNER: yes/no` for `DOC_SLUG`, and prints its outline. |
@@ -332,14 +333,42 @@ so that can be added later without rewriting the app.
 
 ## Hosting (one server)
 
-Railway, Fly or Render all work. The requirements:
+Any host that can run one Docker container with a persistent volume works (Railway, Fly, Render, a VPS…). The requirements:
 
 - **Exactly one instance.** Turn off autoscaling and replicas. Separate machines can't see each other's lock.
-- **A persistent disk** mounted at `SECRETS_DIR` (e.g. `SECRETS_DIR=/data/secrets`). Without it, every
-  redeploy loses the rotated token and you'd have to sign in again.
-- `HOST=0.0.0.0`, and `PORT` as the platform requires. `DOC_SLUG` = the booklet to edit.
-- `NODE_ENV=production`, `DATA_DIR` on the same disk (e.g. `/data/audit`), `CLIENT_IP_HEADER`, and the Turnstile keys.
-  See [Protection](#protection).
+- **A persistent volume at `/data`.** The login (`/data/secrets`), audit log, approval queue and photo-link record
+  (`/data/app`) live there. Without it, every redeploy loses the rotated token and you'd have to sign in again.
+- `DOC_SLUG` = the booklet to edit, plus `CLIENT_IP_HEADER` and the Turnstile keys (or `TURNSTILE_DISABLED=1`).
+  See [Protection](#protection). The image already sets `NODE_ENV=production`, `HOST=0.0.0.0`, `PORT=3000`,
+  `SECRETS_DIR=/data/secrets` and `DATA_DIR=/data/app`.
+
+### Docker
+
+The `Dockerfile` builds the page, compiles the server to plain JavaScript, and runs it as the unprivileged `node` user
+with production dependencies only. `.dockerignore` keeps `.secrets*`, `.data` and `.env*` out of the build.
+
+```sh
+docker build -t ration-club-recipes .
+docker run -d --name recipes -p 3000:3000 -v recipes-data:/data \
+  -e DOC_SLUG=ration-club-recipes-test-doc-fictional-data \
+  -e TURNSTILE_DISABLED=1 \
+  -e DOCSPLUS_LOGIN_BUNDLE='…'  `# first start only, see below` \
+  ration-club-recipes
+```
+
+- `docker stop` sends SIGTERM to the server itself (not via pnpm), so it releases its one-instance lock.
+- Locally, `pnpm build && node server/dist/index.js` runs the same compiled server without Docker.
+
+### Health checks
+
+| Endpoint | Answers | Use it for |
+|---|---|---|
+| `GET /health` | Always `200 {"status":"ok"}` while the process runs. Never calls docs.plus. | The host's health check (the image's `HEALTHCHECK` uses it). A dead login must not make the host restart the server in a loop. |
+| `GET /health/docs` | `200 {"status":"ok","docsPlus":"ok"}` when the server can use docs.plus as you, otherwise **`503`** with `docsPlus`: `login_needed` (sign in again), `not_owner` (`DOC_SLUG` isn't yours) or `unavailable` (docs.plus unreachable). | An uptime monitor that emails you on failure (e.g. a free one polling every 5 minutes). There are no built-in alerts yet. |
+
+`/health/docs` calls docs.plus **at most once a minute** however often it's polled. A successful visitor request in
+the last 5 minutes counts, so a busy site needs no extra calls. The reason it reports is operational
+(no names, tokens or document text). The details are logged on the server.
 
 **Getting the login onto the server.** Use a **separate** docs.plus session for the server, so your laptop and
 the server never share a rotating token:

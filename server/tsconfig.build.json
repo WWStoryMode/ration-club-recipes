@@ -1,0 +1,11 @@
+{
+  // Production build: compiles src/ to dist/ (plain JavaScript, run with `node dist/index.js`).
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "dist",
+    "rootDir": "src",
+    "sourceMap": true
+  },
+  "include": ["src"]
+}

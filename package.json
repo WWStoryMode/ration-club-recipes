@@ -7,7 +7,7 @@
     "prepare": "husky",
     "dev:server": "pnpm --filter server run dev",
     "dev:web": "pnpm --filter web run dev",
-    "build": "pnpm --filter web run build",
+    "build": "pnpm --filter web run build && pnpm --filter server run build",
     "start": "pnpm --filter server run start",
     "login": "pnpm --filter server run login",
     "export-login": "pnpm --filter server run export-login",

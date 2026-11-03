@@ -58,7 +58,16 @@ export class LazyDocs implements Port {
     old?.then(({ client }) => client.close()).catch(() => {});
   }
 
+  /** Called after every successful docs.plus call (the health check uses it). */
+  onSuccess?: () => void;
+
   private async run<T>(fn: (dp: Port) => Promise<T>): Promise<T> {
+    const result = await this.runOnce(fn);
+    this.onSuccess?.();
+    return result;
+  }
+
+  private async runOnce<T>(fn: (dp: Port) => Promise<T>): Promise<T> {
     await this.refresher?.ensureFresh();
     try {
       return await fn((await this.get()).dp);

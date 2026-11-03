@@ -32,7 +32,7 @@ export const MESSAGES = {
   stale: "Someone else is changing this recipe right now. Reload to see the latest version, then try again.",
   rateLimited: "The booklet is getting a lot of changes right now. Please wait a minute and try again.",
   unconfirmed: "We couldn't confirm your change was saved. Please wait a minute and reload before trying again, so it isn't saved twice.",
-  unavailable: "The recipe booklet can't be changed right now. The organisers have been told. Please try again later.",
+  unavailable: "The recipe booklet isn't available right now. Please try again later.",
   internal: "Something went wrong on our side. Please try again in a moment.",
   media: "Pictures and videos can only be changed by the booklet's organisers.",
   rejected: "docs.plus couldn't accept this change. Please check the text and try again.",
