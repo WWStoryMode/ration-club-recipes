@@ -166,16 +166,40 @@ export class RecipesService {
     return { ...this.summary(recipe), fields: recipeFields(sections[0]!.blocks), sections: sections.map(sectionView) };
   }
 
+  /** A section as it is now (uncached), for an organiser reviewing a pending change. */
+  async currentSection(sectionId: string): Promise<SectionView> {
+    this.recipeOf(await this.outline(), sectionId);
+    return sectionView(await this.o.docs.readSection(sectionId));
+  }
+
+  /** The id of the booklet heading (the first top-level section), whose chat room is the general one. */
+  async bookletId(): Promise<string | undefined> {
+    return this.root(await this.outline()).sectionId ?? undefined;
+  }
+
+  /**
+   * Everything saveSection checks, without writing: clean text, the section is part of a recipe, the visitor's
+   * baseRev is still current (409 with the latest version if not), and the number of text parts matches.
+   * Used to queue a change for approval, so visitors hear about problems straight away.
+   */
+  async checkSection(sectionId: string, baseRev: string, texts: string[]): Promise<{ texts: string[]; recipe: { id: string; title: string }; before: SectionView; changed: boolean }> {
+    const clean = this.cleanTexts(texts);
+    const recipe = this.recipeIdent(await this.outline(), sectionId);
+    const s = await this.o.docs.readSection(sectionId);
+    if (s.rev !== baseRev) throw new ApiError("conflict", MESSAGES.conflict, { latest: sectionView(s) });
+    const textSegs = this.textSegments(s, clean);
+    return { texts: clean, recipe, before: sectionView(s), changed: textSegs.some((g, i) => normalizeMarkdown(segmentText(g)) !== clean[i]) };
+  }
+
   /**
    * Replace a section's text parts. `baseRev` is the rev the visitor started from: if the section changed
    * since then, nothing is written and the latest version comes back with a 409.
+   * `baseRev: null` writes over whatever is there now (an organiser approving a change that has since been overtaken).
    * Media blocks are never touched. Changed text parts are written bottom-up, so earlier block numbers stay valid.
    */
-  async saveSection(sectionId: string, baseRev: string, texts: string[]): Promise<SaveResult> {
-    if (texts.length > LIMITS.texts) throw new ApiError("invalid", "Too many parts in one save.");
-    const clean = texts.map((t, i) => checkVisitorMarkdown(t, texts.length > 1 ? `Part ${i + 1}` : "Text"));
-    const recipeNode = this.recipeOf(await this.outline(), sectionId); // must be a recipe or one of its subsections
-    const recipe = { id: recipeNode.sectionId!, title: recipeNode.title };
+  async saveSection(sectionId: string, baseRev: string | null, texts: string[]): Promise<SaveResult> {
+    const clean = this.cleanTexts(texts);
+    const recipe = this.recipeIdent(await this.outline(), sectionId); // must be a recipe or one of its subsections
 
     return this.o.lock.withLock(this.o.slug, async () => {
       try {
@@ -192,15 +216,30 @@ export class RecipesService {
     });
   }
 
-  private async writeSection(sectionId: string, baseRev: string, texts: string[]): Promise<Omit<SaveResult, "recipe">> {
-    let s = await this.o.docs.readSection(sectionId);
-    if (s.rev !== baseRev) throw new ApiError("conflict", MESSAGES.conflict, { latest: sectionView(s) });
-    const before = sectionView(s);
+  private cleanTexts(texts: string[]): string[] {
+    if (texts.length > LIMITS.texts) throw new ApiError("invalid", "Too many parts in one save.");
+    return texts.map((t, i) => checkVisitorMarkdown(t, texts.length > 1 ? `Part ${i + 1}` : "Text"));
+  }
 
+  private recipeIdent(outline: Outline, sectionId: string) {
+    const node = this.recipeOf(outline, sectionId);
+    return { id: node.sectionId!, title: node.title };
+  }
+
+  private textSegments(s: Section, texts: string[]) {
     const textSegs = toSegments(s.blocks).filter((g) => g.kind === "text");
     if (texts.length !== textSegs.length) {
       throw new ApiError("invalid", `This section has ${textSegs.length} text part(s), but ${texts.length} were sent. Please reload.`);
     }
+    return textSegs;
+  }
+
+  private async writeSection(sectionId: string, baseRev: string | null, texts: string[]): Promise<Omit<SaveResult, "recipe">> {
+    let s = await this.o.docs.readSection(sectionId);
+    if (baseRev !== null && s.rev !== baseRev) throw new ApiError("conflict", MESSAGES.conflict, { latest: sectionView(s) });
+    const before = sectionView(s);
+
+    const textSegs = this.textSegments(s, texts);
     const changed = textSegs.map((g, i) => i).filter((i) => normalizeMarkdown(segmentText(textSegs[i]!)) !== texts[i]);
 
     for (let k = changed.length - 1; k >= 0; k--) {
@@ -209,6 +248,20 @@ export class RecipesService {
       s = await this.o.docs.readSection(sectionId); // edit_blocks returns no rev
     }
     return { section: sectionView(s), before, changed: changed.length > 0 };
+  }
+
+  /** Everything addRecipe checks, without writing: a valid name and body, and no recipe with that name yet. */
+  async checkNewRecipe(rawTitle: string, rawMarkdown: string): Promise<{ title: string; markdown: string }> {
+    const title = checkTitle(rawTitle);
+    const markdown = checkVisitorMarkdown(rawMarkdown);
+    this.assertNewName(this.root(await this.outline()), title);
+    return { title, markdown };
+  }
+
+  private assertNewName(root: OutlineNode, title: string) {
+    if (root.children.some((c) => nameKey(c.title) === nameKey(title))) {
+      throw new ApiError("conflict", `There's already a recipe called "${title}". Please edit that one, or choose another name.`);
+    }
   }
 
   /**
@@ -228,14 +281,11 @@ export class RecipesService {
           console.error("[recipes] the booklet heading is not the last top-level section; refusing to append");
           throw new ApiError("unavailable", MESSAGES.unavailable);
         }
-        const key = (t: string) => t.toLowerCase().replace(/\s+/g, " ").trim();
-        if (root.children.some((c) => key(c.title) === key(title))) {
-          throw new ApiError("conflict", `There's already a recipe called "${title}". Please edit that one, or choose another name.`);
-        }
+        this.assertNewName(root, title);
         const level = mostCommonLevel(root.children) ?? 3;
         await this.o.docs.appendRecipe(`**${title}**`, body, level); // never retried: a retry could add it twice
 
-        const added = this.root(await this.outline(true)).children.filter((c) => key(c.title) === key(title)).at(-1);
+        const added = this.root(await this.outline(true)).children.filter((c) => nameKey(c.title) === nameKey(title)).at(-1);
         if (!added?.sectionId) throw new ApiError("unconfirmed", MESSAGES.unconfirmed);
         return this.summary(added);
       } finally {
@@ -244,6 +294,8 @@ export class RecipesService {
     });
   }
 }
+
+const nameKey = (t: string) => t.toLowerCase().replace(/\s+/g, " ").trim();
 
 function mostCommonLevel(nodes: OutlineNode[]): number | undefined {
   const counts = new Map<number, number>();

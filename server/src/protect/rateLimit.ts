@@ -32,6 +32,14 @@ export class RateLimiter {
     return { ok: true, retryAfter: 0 };
   }
 
+  /** Whether the key has used up its window, without counting a hit. */
+  peek(key: string): { ok: boolean; retryAfter: number } {
+    const t = this.now();
+    const w = this.hits.get(key);
+    if (!w || t - w.start >= this.windowMs || w.count < this.limit) return { ok: true, retryAfter: 0 };
+    return { ok: false, retryAfter: Math.max(1, Math.ceil((w.start + this.windowMs - t) / 1000)) };
+  }
+
   private sweep(t: number) {
     this.lastSweep = t;
     for (const [k, w] of this.hits) if (t - w.start >= this.windowMs) this.hits.delete(k);

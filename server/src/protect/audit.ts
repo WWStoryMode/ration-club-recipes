@@ -2,13 +2,14 @@ import { createHmac, randomBytes } from "node:crypto";
 import { appendFile, chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-export type AuditOutcome = "saved" | "unchanged" | "added" | "conflict" | "refused" | "blocked" | "failed";
+export type AuditOutcome = "saved" | "unchanged" | "added" | "queued" | "rejected" | "conflict" | "refused" | "blocked" | "failed";
 
 /** One line per write attempt. Never holds a raw IP: only a salted hash, so repeat sources can be spotted, not identified. */
 export interface AuditEntry {
   ts: string;
   requestId: string;
-  action: "save_section" | "add_recipe";
+  /** Visitors: save_section, add_recipe. Organisers (approval queue): approve, reject. */
+  action: "save_section" | "add_recipe" | "approve" | "reject";
   outcome: AuditOutcome;
   reason?: string;
   ipHash: string;
@@ -20,6 +21,8 @@ export interface AuditEntry {
   before?: string[]; // text parts before the write
   after?: string[]; // text parts after the write
   attempted?: string[]; // what the visitor sent, when it wasn't written (truncated)
+  pendingId?: string; // approval queue item
+  note?: string; // organiser's note on a decision
 }
 
 export interface AuditLog {

@@ -26,6 +26,12 @@ export const config = {
     readsPerIp: process.env.RATE_READS_PER_IP, // default 120/60
     writesGlobal: process.env.RATE_WRITES_GLOBAL, // default 30/60
   },
+  /** Phase 4b. REQUIRE_APPROVAL=1: visitors' changes wait for an organiser (needs ADMIN_TOKEN). */
+  requireApproval: process.env.REQUIRE_APPROVAL === "1",
+  adminToken: process.env.ADMIN_TOKEN?.trim() || undefined,
+  queue: { max: process.env.QUEUE_MAX, perIp: process.env.QUEUE_PER_IP },
+  /** CHAT_SUMMARIES=1: post a one-line note in the docs.plus chat after each change is written. */
+  chatSummaries: process.env.CHAT_SUMMARIES === "1",
   get redirectUrl() {
     return `http://localhost:${this.redirectPort}/callback`;
   },

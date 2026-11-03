@@ -1,14 +1,17 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { secureHeaders } from "hono/secure-headers";
 import { z } from "zod";
+import { chatText, noChat, type ChatNotifier } from "./chat.js";
 import { ApiError, toApiError } from "./errors.js";
+import { InMemoryLock } from "./lock.js";
 import { noAudit, truncate, type AuditEntry, type AuditLog } from "./protect/audit.js";
 import { clientIp } from "./protect/clientIp.js";
-import type { RateLimiter } from "./protect/rateLimit.js";
+import { RateLimiter } from "./protect/rateLimit.js";
 import { noHumanCheck, type HumanCheck } from "./protect/turnstile.js";
-import type { RecipesService } from "./recipes.js";
+import { isPendingId, type PendingChange, type PendingQueue } from "./queue.js";
+import type { RecipesService, SectionView } from "./recipes.js";
 import { LIMITS } from "./validate.js";
 
 /** Name of the hidden form field. People never see or fill it; bots that fill every field do. */
@@ -29,6 +32,20 @@ const AddRecipe = z.object({
   ...protectedFields,
 });
 const SECTION_ID = /^[A-Za-z0-9_-]{1,64}$/;
+const Approve = z.object({ overwrite: z.boolean().default(false) });
+const Reject = z.object({ note: z.string().max(500).optional() });
+
+/** Shown to visitors when their change is queued. */
+export const QUEUED_MESSAGE = "Thanks! Your change has been sent to the organisers. It will appear in the booklet once they've checked it.";
+
+const texts = (v: SectionView) => v.parts.flatMap((x) => (x.type === "text" ? [x.markdown] : []));
+
+/** Organiser access to the approval queue. The token is compared in constant time; failures are rate-limited per IP. */
+function tokenMatches(expected: string, got: string | undefined): boolean {
+  if (!got) return false;
+  const h = (x: string) => createHash("sha256").update(x).digest();
+  return timingSafeEqual(h(expected), h(got));
+}
 
 export interface Protection {
   humanCheck: HumanCheck;
@@ -75,8 +92,20 @@ function outcomeOf(e: ApiError): Pick<AuditEntry, "outcome" | "reason"> {
   return { outcome: "failed", reason: `${e.code}: ${reason}` };
 }
 
-export function createApp(deps: { recipes: RecipesService; protection?: Protection }) {
+export interface AppDeps {
+  recipes: RecipesService;
+  protection?: Protection;
+  /** Set = REQUIRE_APPROVAL: visitors' changes are queued, and only an organiser's approval writes them. */
+  queue?: PendingQueue;
+  /** Bearer token for /api/admin/*. Unset = no admin routes. */
+  adminToken?: string;
+  /** Optional one-line notes in the docs.plus chat after a change is written. */
+  chat?: ChatNotifier;
+}
+
+export function createApp(deps: AppDeps) {
   const p = deps.protection ?? openProtection;
+  const chat = deps.chat ?? noChat;
   const app = new Hono();
 
   app.use("*", secureHeaders());
@@ -134,6 +163,7 @@ export function createApp(deps: { recipes: RecipesService; protection?: Protecti
     c.json({
       turnstileSiteKey: p.humanCheck.siteKey,
       honeypotField: HONEYPOT_FIELD,
+      requiresApproval: !!deps.queue,
       limits: { sectionChars: LIMITS.sectionChars, titleChars: LIMITS.titleChars, links: LIMITS.links },
     }),
   );
@@ -146,8 +176,31 @@ export function createApp(deps: { recipes: RecipesService; protection?: Protecti
     guardedWrite(c, "save_section", SaveSection, async (b, entry) => {
       const id = sectionId(c.req.param("id"));
       Object.assign(entry, { baseRev: b.baseRev, attempted: truncate(b.texts) });
+
+      if (deps.queue) {
+        const chk = await deps.recipes.checkSection(id, b.baseRev, b.texts);
+        Object.assign(entry, { recipeId: chk.recipe.id, recipe: chk.recipe.title, before: texts(chk.before) });
+        if (!chk.changed) {
+          Object.assign(entry, { outcome: "unchanged", attempted: undefined });
+          return c.json({ section: chk.before });
+        }
+        const item = await deps.queue.add({
+          kind: "save_section",
+          requestId: entry.requestId,
+          ipHash: entry.ipHash,
+          sectionId: id,
+          section: chk.before.title,
+          recipeId: chk.recipe.id,
+          recipe: chk.recipe.title,
+          baseRev: b.baseRev,
+          before: texts(chk.before),
+          texts: chk.texts,
+        });
+        Object.assign(entry, { outcome: "queued", pendingId: item.id, attempted: chk.texts });
+        return c.json({ pending: { id: item.id }, message: QUEUED_MESSAGE }, 202);
+      }
+
       const r = await deps.recipes.saveSection(id, b.baseRev, b.texts);
-      const texts = (v: typeof r.section) => v.parts.flatMap((x) => (x.type === "text" ? [x.markdown] : []));
       Object.assign(entry, {
         outcome: r.changed ? "saved" : "unchanged",
         recipeId: r.recipe.id,
@@ -157,6 +210,7 @@ export function createApp(deps: { recipes: RecipesService; protection?: Protecti
         after: texts(r.section),
         attempted: undefined,
       });
+      if (r.changed) chat.notify(r.recipe.id, chatText.updated(r.recipe.title, r.section.title, false));
       return c.json({ section: r.section });
     }, { sectionId: c.req.param("id").slice(0, 64) }),
   );
@@ -164,11 +218,118 @@ export function createApp(deps: { recipes: RecipesService; protection?: Protecti
   app.post("/api/recipes", (c) =>
     guardedWrite(c, "add_recipe", AddRecipe, async (b, entry) => {
       Object.assign(entry, { recipe: b.title.slice(0, 200), attempted: truncate([b.markdown]) });
+
+      if (deps.queue) {
+        const chk = await deps.recipes.checkNewRecipe(b.title, b.markdown);
+        const item = await deps.queue.add({ kind: "add_recipe", requestId: entry.requestId, ipHash: entry.ipHash, title: chk.title, markdown: chk.markdown });
+        Object.assign(entry, { outcome: "queued", recipe: chk.title, pendingId: item.id, attempted: [chk.markdown] });
+        return c.json({ pending: { id: item.id }, message: QUEUED_MESSAGE }, 202);
+      }
+
       const r = await deps.recipes.addRecipe(b.title, b.markdown);
       Object.assign(entry, { outcome: "added", recipeId: r.id, sectionId: r.id, recipe: r.title, after: [b.markdown], attempted: undefined });
+      chat.notify(undefined, chatText.added(r.title, false));
       return c.json({ recipe: r }, 201);
     }),
   );
 
-  return app;
+  if (deps.queue && deps.adminToken) mountAdmin(app, deps as Required<Pick<AppDeps, "queue" | "adminToken">> & AppDeps, p, chat);
+
+    return app;
+}
+
+/**
+ * Organiser routes for the approval queue. All need `Authorization: Bearer <ADMIN_TOKEN>`.
+ * Every decision is audited (action approve/reject, with the pending id). Decisions on one item never overlap.
+ */
+function mountAdmin(app: Hono, deps: AppDeps & { queue: PendingQueue; adminToken: string }, p: Protection, chat: ChatNotifier) {
+  const fails = new RateLimiter(10, 10 * 60_000);
+  const decide = new InMemoryLock();
+  const audit = (e: AuditEntry) => p.audit.write(e).catch((err) => console.error("[audit] could not write the audit log:", err));
+
+  app.use("/api/admin/*", async (c, next) => {
+    const ip = clientIp(c, p.ipHeader);
+    const blocked = fails.peek(ip);
+    if (!blocked.ok) {
+      c.header("Retry-After", String(blocked.retryAfter));
+      throw new ApiError("rate_limited", "Too many wrong admin tokens. Please wait and try again.");
+    }
+    const got = /^Bearer\s+(.+)$/i.exec(c.req.header("authorization") ?? "")?.[1]?.trim();
+    if (!tokenMatches(deps.adminToken, got)) {
+      fails.take(ip);
+      return c.json({ error: { code: "unauthorized", message: "Admin token missing or wrong." } }, 401);
+    }
+    await next();
+  });
+
+  const item = async (raw: string): Promise<PendingChange> => {
+    const found = isPendingId(raw) ? await deps.queue.get(raw) : undefined;
+    if (!found) throw new ApiError("not_found", "That pending change doesn't exist. It may already have been approved or rejected.");
+    return found;
+  };
+
+  app.get("/api/admin/pending", async (c) => c.json({ pending: await deps.queue.list() }));
+
+  /** One item, plus (for a section change) the section as it is now and whether it changed since the visitor loaded it. */
+  app.get("/api/admin/pending/:id", async (c) => {
+    const it = await item(c.req.param("id"));
+    if (it.kind !== "save_section") return c.json({ pending: it });
+    const current = await deps.recipes.currentSection(it.sectionId);
+    return c.json({ pending: it, current: texts(current), changedSince: current.rev !== it.baseRev });
+  });
+
+  const decision = (action: "approve" | "reject", c: Context, id: string): AuditEntry => {
+    const requestId = randomUUID();
+    c.header("X-Request-Id", requestId);
+    return { ts: new Date().toISOString(), requestId, action, outcome: "failed", ipHash: p.hashIp(clientIp(c, p.ipHeader)), pendingId: id };
+  };
+
+  app.post("/api/admin/pending/:id/approve", (c) =>
+    decide.withLock("decide", async () => {
+      const entry = decision("approve", c, c.req.param("id").slice(0, 64));
+      try {
+        const { overwrite } = await body(c, Approve);
+        const it = await item(c.req.param("id"));
+        let res: Response;
+        if (it.kind === "save_section") {
+          Object.assign(entry, { sectionId: it.sectionId, recipeId: it.recipeId, recipe: it.recipe, baseRev: it.baseRev, attempted: truncate(it.texts) });
+          const r = await deps.recipes.saveSection(it.sectionId, overwrite ? null : it.baseRev, it.texts);
+          Object.assign(entry, { outcome: r.changed ? "saved" : "unchanged", newRev: r.section.rev, before: texts(r.before), after: texts(r.section), attempted: undefined });
+          if (r.changed) chat.notify(r.recipe.id, chatText.updated(r.recipe.title, r.section.title, true));
+          res = c.json({ approved: it.id, section: r.section });
+        } else {
+          Object.assign(entry, { recipe: it.title, attempted: truncate([it.markdown]) });
+          const r = await deps.recipes.addRecipe(it.title, it.markdown);
+          Object.assign(entry, { outcome: "added", recipeId: r.id, sectionId: r.id, recipe: r.title, after: [it.markdown], attempted: undefined });
+          chat.notify(undefined, chatText.added(r.title, true));
+          res = c.json({ approved: it.id, recipe: r });
+        }
+        await deps.queue.remove(it.id);
+        await audit(entry);
+        return res;
+      } catch (err) {
+        const e = toApiError(err);
+        await audit({ ...entry, ...outcomeOf(e) });
+        if (e.code === "conflict" && e.extra.latest) {
+          // Keep the item: the organiser can reject it, or approve again with overwrite.
+          throw new ApiError("conflict", "This section changed after the visitor started editing. Reject this change, or approve it with overwrite to replace the newer text.", { latest: e.extra.latest });
+        }
+        throw e;
+      }
+    }),
+  );
+
+  app.post("/api/admin/pending/:id/reject", (c) =>
+    decide.withLock("decide", async () => {
+      const entry = decision("reject", c, c.req.param("id").slice(0, 64));
+      const { note } = await body(c, Reject);
+      const it = await item(c.req.param("id"));
+      Object.assign(entry, it.kind === "save_section"
+        ? { sectionId: it.sectionId, recipeId: it.recipeId, recipe: it.recipe, attempted: truncate(it.texts) }
+        : { recipe: it.title, attempted: truncate([it.markdown]) });
+      await deps.queue.remove(it.id);
+      await audit({ ...entry, outcome: "rejected", note: note?.trim() || undefined });
+      return c.json({ rejected: it.id });
+    }),
+  );
 }
