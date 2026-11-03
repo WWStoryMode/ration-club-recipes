@@ -6,6 +6,7 @@ import { secureHeaders } from "hono/secure-headers";
 import { z } from "zod";
 import { chatText, noChat, type ChatNotifier } from "./chat.js";
 import { ApiError, toApiError } from "./errors.js";
+import type { Health } from "./health.js";
 import { InMemoryLock } from "./lock.js";
 import { noAudit, truncate, type AuditEntry, type AuditLog } from "./protect/audit.js";
 import { clientIp } from "./protect/clientIp.js";
@@ -132,6 +133,8 @@ export interface AppDeps {
   chat?: ChatNotifier;
   /** The built web page (web/dist). Served for every non-API GET. Unset = API only (local dev uses Vite). */
   webRoot?: string;
+  /** docs.plus health, for GET /health/docs. */
+  health?: Health;
 }
 
 /**
@@ -207,6 +210,26 @@ export function createApp(deps: AppDeps) {
       throw e;
     }
   }
+
+  /**
+   * Liveness: the process is up and answering. Never calls docs.plus, so a dead login can't make the host restart
+   * the server in a loop. For the host's health check.
+   */
+  app.get("/health", (c) => {
+    c.header("Cache-Control", "no-store");
+    return c.json({ status: "ok" });
+  });
+
+  /**
+   * Can the server still act on docs.plus? 503 when it can't (for example the login needs renewing), so an uptime
+   * monitor can alert you. Calls docs.plus at most once a minute, however often it is polled.
+   */
+  app.get("/health/docs", async (c) => {
+    c.header("Cache-Control", "no-store");
+    if (!deps.health) return c.json({ status: "unknown" }, 503);
+    const h = await deps.health.check();
+    return c.json({ status: h.ok ? "ok" : "degraded", docsPlus: h.docsPlus, ...(h.lastSuccess ? { lastSuccess: h.lastSuccess } : {}) }, h.ok ? 200 : 503);
+  });
 
   app.get("/api/config", (c) =>
     c.json({
@@ -317,9 +340,9 @@ export function createApp(deps: AppDeps) {
     });
     const files = serveStatic({ root });
     const page = serveStatic({ root, path: "index.html" });
-    app.get("*", async (c, next) => (c.req.path.startsWith("/api/") ? next() : files(c, next)));
+    app.get("*", async (c, next) => (c.req.path.startsWith("/api/") || c.req.path.startsWith("/health") ? next() : files(c, next)));
     app.get("*", async (c, next) => {
-      if (c.req.path.startsWith("/api/") || c.req.path.startsWith("/assets/")) return next();
+      if (c.req.path.startsWith("/api/") || c.req.path.startsWith("/assets/") || c.req.path.startsWith("/health")) return next();
       c.header("Cache-Control", "no-cache");
       return page(c, next);
     });

@@ -1,0 +1,20 @@
+# Never send secrets or local data into an image (the build context is copied into the builder).
+.secrets*
+.data
+.env*
+!.env.example
+*.pem
+*.key
+
+# Rebuilt inside the image
+node_modules
+**/node_modules
+**/dist
+
+# Not needed to build
+.git
+.github
+.husky
+**/*.log
+gitleaks-report*
+*.sarif

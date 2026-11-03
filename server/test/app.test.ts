@@ -84,8 +84,8 @@ describe("HTTP API", () => {
   it("maps docs.plus failures to plain messages without leaking internals", async () => {
     const cases: Array<[unknown, number, RegExp]> = [
       [new DocsPlusError("rate_limited", "get_outline", "Rate limit"), 429, /wait a minute/],
-      [new DocsPlusError("not_owner", "get_outline", "secret detail"), 503, /can't be changed right now/],
-      [new NeedsLoginError(), 503, /can't be changed right now/],
+      [new DocsPlusError("not_owner", "get_outline", "secret detail"), 503, /isn't available right now/],
+      [new NeedsLoginError(), 503, /isn't available right now/],
       [new Error("socket hang up at 10.0.0.1"), 500, /went wrong on our side/],
     ];
     for (const [err, status, msg] of cases) {

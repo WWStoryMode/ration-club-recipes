@@ -18,6 +18,7 @@ import { defaultStore } from "./mcp.js";
 import { FileAuditLog, ipHasher, loadSalt } from "./protect/audit.js";
 import { parseRate, RateLimiter } from "./protect/rateLimit.js";
 import { noHumanCheck, Turnstile, type HumanCheck } from "./protect/turnstile.js";
+import { Health } from "./health.js";
 import { FilePhotoLinks } from "./photos.js";
 import { FilePendingQueue } from "./queue.js";
 import { RecipesService } from "./recipes.js";
@@ -94,13 +95,15 @@ async function main() {
   try {
     const port = Number(process.env.PORT ?? 3000);
     const docs = new LazyDocs(config.docSlug, { store });
+    const health = new Health({ probe: () => docs.getOutline() });
+    docs.onSuccess = () => health.noteSuccess();
     const recipes = new RecipesService({ docs, lock: new InMemoryLock(), slug: config.docSlug, photoLinks: new FilePhotoLinks(path.join(config.dataDir, "photo-links.json")) });
     const chat = config.chatSummaries ? new ChatSummaries({ chat: docs, booklet: () => recipes.bookletId() }) : undefined;
     if (chat) console.log("[start] Chat summaries are ON.");
     const webRoot = path.resolve(config.repoRoot, process.env.WEB_DIST ?? "web/dist");
     const hasWeb = existsSync(path.join(webRoot, "index.html"));
     if (!hasWeb) console.warn(`[start] No web page build in ${webRoot}: serving the API only. Run \`pnpm build\` to build it.`);
-    const server = serve({ fetch: createApp({ recipes, protection, chat, ...approvalDeps, webRoot: hasWeb ? webRoot : undefined }).fetch, port, hostname: process.env.HOST ?? "127.0.0.1" }, () => {
+    const server = serve({ fetch: createApp({ recipes, protection, chat, ...approvalDeps, health, webRoot: hasWeb ? webRoot : undefined }).fetch, port, hostname: process.env.HOST ?? "127.0.0.1" }, () => {
       console.log(`${hasWeb ? "Site and API" : "API"} on http://localhost:${port}  (doc: ${config.docSlug})`);
     });
     server.on("error", (err) => {

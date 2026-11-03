@@ -15,6 +15,7 @@
     "capture-fixtures": "tsx --env-file-if-exists=../.env src/scripts/captureFixtures.ts",
     "write-test": "tsx --env-file-if-exists=../.env src/scripts/writeTest.ts",
     "format-test": "tsx --env-file-if-exists=../.env src/scripts/formatTest.ts",
+    "build": "tsc -p tsconfig.build.json",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
